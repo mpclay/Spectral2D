@@ -21,7 +21,7 @@ MODULE Spectral_m
 
    ! Required modules.
    USE ISO_C_BINDING
-   USE Parameters_m,ONLY: IWPF, RWPF, IWPC, RWPC
+   USE Parameters_m,ONLY: IWPF, RWPF, IWPC, RWPC, CWPC
 
    IMPLICIT NONE
 
@@ -89,8 +89,38 @@ CONTAINS
    END SUBROUTINE GetGridSize
 
    !> Initialize the spectral module.
-   SUBROUTINE SpectralSetup()
+   !!
+   !! In this routine we create the FFTW MPI plans that are used to transform
+   !! signals to/from spectral space.
+   !!
+   !> @param[in] nxW Working size of the arrays in the x direction.
+   !> @param[in] nyW Working size of the arrays in the y direction.
+   !> @param[in] rISize Size of memory in i direction for Qr.
+   !> @param[in] cISize Size of memory in j direction for Qc.
+   !> @param[in] nVar Number of variables in the Q array.
+   !> @param[in] nStr Number of time storage locations in the Q array.
+   !> @param[in] Qr Real cast of data array.
+   !> @param[in] Qc Complex case of data array.
+   SUBROUTINE SpectralSetup(nxW, nyW, rISize, cISize, nVar, nStr, Qr, Qc)
+      ! Required modules.
+      USE MPI,ONLY: MPI_COMM_WORLD
       IMPLICIT NONE
+      ! Calling arguments.
+      INTEGER(KIND=IWPF),INTENT(IN) :: nxW, nyW, rISize, cISize, nVar, nStr
+      REAL(KIND=RWPC),DIMENSION(rISize,nyW,nVar,nStr),INTENT(INOUT) :: Qr
+      COMPLEX(KIND=CWPC),DIMENSION(cISize,nyW,nVar,nStr),INTENT(INOUT) :: Qc
+
+      ! The plan for the forward transform (R to C). Reverse ordering for C.
+      r2cPlan = FFTW_MPI_PLAN_DFT_R2C_2D(INT(nyW, C_INTPTR_T), &
+                                         INT(nxW, C_INTPTR_T), &
+                                         Qr(:,:,1,1), Qc(:,:,1,1), &
+                                         MPI_COMM_WORLD, FFTW_ESTIMATE)
+      !
+      ! The plan for the reverse transform (C to R). Reverse ordering for C.
+      c2rPlan = FFTW_MPI_PLAN_DFT_C2R_2D(INT(nyW, C_INTPTR_T), &
+                                         INT(nxW, C_INTPTR_T), &
+                                         Qc(:,:,1,1), Qr(:,:,1,1), &
+                                         MPI_COMM_WORLD, FFTW_ESTIMATE)
    END SUBROUTINE SpectralSetup
 
    !> Finalize the spectral module.

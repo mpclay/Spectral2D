@@ -31,6 +31,8 @@ MODULE Parameters_m
    INTEGER,PARAMETER,PUBLIC :: RWPC = C_DOUBLE
    !> Working precision for reals with Fortran.
    INTEGER,PARAMETER,PUBLIC :: RWPF = REAL64
+   !> Working precision for complex with C.
+   INTEGER,PARAMETER,PUBLIC :: CWPC = C_DOUBLE_COMPLEX
    !> Working precision for integers with C.
    INTEGER,PARAMETER,PUBLIC :: IWPC = C_INTPTR_T
    !> Working precision for integer with Fortran.
