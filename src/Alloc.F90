@@ -29,13 +29,14 @@ MODULE Alloc_m
 
    ! Main interface to allocation routines.
    INTERFACE Alloc
-      MODULE PROCEDURE Alloc2D
-      MODULE PROCEDURE Alloc4D
+      MODULE PROCEDURE Alloc2DComplexFFTW
+      MODULE PROCEDURE Alloc2DComplexFortran
+      MODULE PROCEDURE Alloc4DComplexFFTW
    END INTERFACE
 
    ! Module procedures.
    PUBLIC :: GetAllocSize, Dealloc
-   PRIVATE :: Alloc2D, Alloc4D
+   PRIVATE :: Alloc2DComplexFFTW, Alloc2DComplexFortran, Alloc4DComplexFFTW
 
 CONTAINS
 
@@ -91,7 +92,7 @@ CONTAINS
    !> @param[in] cISize Desired size of the i-dimension for complex numbers.
    !> @param[in] nyW Working number of grid points in the y direction.
    !> @param[in,out] array Data array for the simulation.
-   SUBROUTINE Alloc2D(cISize, nyW, array)
+   SUBROUTINE Alloc2DComplexFFTW(cISize, nyW, array)
       ! Required modules.
       USE ISO_C_BINDING
       IMPLICIT NONE
@@ -108,7 +109,34 @@ CONTAINS
       !     (cISize=size of the i dimension in spectral space) X
       !     (nyW=size of the j dimension in physical/spectral space)
       array = FFTW_ALLOC_COMPLEX(INT(cISize*nyW, C_SIZE_T))
-   END SUBROUTINE Alloc2D
+   END SUBROUTINE Alloc2DComplexFFTW
+
+   !> Procedure to allocate 2D working arrays.
+   !!
+   !> @param[in] cISize Desired size of the i-dimension for complex numbers.
+   !> @param[in] nyW Working number of grid points in the y direction.
+   !> @param[in] iStart Starting index for i dimension.
+   !> @param[in] jStart Starting index for j dimension.
+   !> @param[in,out] array Data array being allocated.
+   SUBROUTINE Alloc2DComplexFortran(cISize, nyW, iStart, jStart, array)
+      IMPLICIT NONE
+      ! Calling arguments.
+      INTEGER(KIND=IWPF),INTENT(IN) :: cISize, nyW, iStart, jStart
+      COMPLEX(KIND=CWPC),DIMENSION(:,:),ALLOCATABLE,INTENT(INOUT) :: array
+      ! Local variables.
+      ! Ending indices for the allocated array.
+      INTEGER(KIND=IWPF) :: iEnd, jEnd
+
+      ! Free memory if it is already in use.
+      IF (ALLOCATED(array)) THEN
+         DEALLOCATE(array)
+      END IF
+
+      ! Allocate memory with desired starting and ending indices.
+      iEnd = iStart + cISize - 1_IWPF
+      jEnd = jStart + nyW - 1_IWPF
+      ALLOCATE(array(iStart:iEnd,jStart:jEnd))
+   END SUBROUTINE Alloc2DComplexFortran
 
    !> Procedure to allocate 4D working arrays.
    !!
@@ -117,7 +145,7 @@ CONTAINS
    !> @param[in] nVar Number of variables in the simulation.
    !> @param[in] nStr Required number of storage arrays for time integration.
    !> @param[in,out] array Data array for the simulation.
-   SUBROUTINE Alloc4D(cISize, nyW, nVar, nStr, array)
+   SUBROUTINE Alloc4DComplexFFTW(cISize, nyW, nVar, nStr, array)
       ! Required modules.
       USE ISO_C_BINDING
       IMPLICIT NONE
@@ -136,7 +164,7 @@ CONTAINS
       !     (nVar=number of variables in the simulation) X
       !     (nStr=number of storage sites for time integration).
       array = FFTW_ALLOC_COMPLEX(INT(cISize*nyW*nVar*nStr, C_SIZE_T))
-   END SUBROUTINE Alloc4D
+   END SUBROUTINE Alloc4DComplexFFTW
 
    !> Routine to free memory for the simulation.
    !!

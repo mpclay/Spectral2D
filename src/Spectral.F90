@@ -73,6 +73,7 @@ MODULE Spectral_m
 
    ! Module procedures.
    PUBLIC :: GetGridSize, SpectralSetup, SpectralFinalize
+   PUBLIC :: ComputeRHS, ComputePsi
    PRIVATE :: DuDx, DuDy
 
 CONTAINS
@@ -226,6 +227,9 @@ CONTAINS
                          Q, nu, uC, vC, wC, uR, vR, wR, dQ)
       IMPLICIT NONE
       ! Calling arguments.
+      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, nxW, nyW
+      INTEGER(KIND=IWPF),INTENT(IN) :: kxLT, kyLT, kxMT, kyMT
+      INTEGER(KIND=IWPF),INTENT(IN) :: kxLU, kyLU, kxMU, kyMU
       COMPLEX(KIND=CWPC),DIMENSION(kxLT:kxMT,kyLT:kyMT,2),INTENT(INOUT) :: Q
       COMPLEX(KIND=CWPC),DIMENSION(kxLT:kxMT,kyLT:kyMT),INTENT(INOUT) :: uC
       COMPLEX(KIND=CWPC),DIMENSION(kxLT:kxMT,kyLT:kyMT),INTENT(INOUT) :: vC
@@ -233,9 +237,6 @@ CONTAINS
       REAL(KIND=RWPC),DIMENSION(rISize,nyW),INTENT(INOUT) :: uR, vR, wR
       COMPLEX(KIND=CWPC),DIMENSION(kxLU:kxMU,kyLU:kxMU),INTENT(OUT) :: dQ
       REAL(KIND=RWPC),INTENT(IN) :: nu
-      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, nxW, nyW
-      INTEGER(KIND=IWPF),INTENT(IN) :: kxLT, kyLT, kxMT, kyMT
-      INTEGER(KIND=IWPF),INTENT(IN) :: kxLU, kyLU, kxMU, kyMU
       ! Local variables.
       ! Looping indices for kx and ky wavenumbers.
       INTEGER(KIND=IWPF) :: kx, ky
@@ -315,6 +316,54 @@ CONTAINS
          END DO
       END DO
    END SUBROUTINE ComputeRHS
+
+   !> Routine to solve the Poisson equation for the stream function.
+   !!
+   !! The stream function is related to the vorticity by:
+   !!
+   !!    d^2(Psi)/dx^2 + d^2(Psi)/dy^2 = -w
+   !!
+   !! In spectral space, this is
+   !!
+   !!    psi = w/k**2
+   !!
+   !! In this routine we solve the poisson equation in spectral space.
+   !!
+   !> @param[in] kxLT Absolute smallest x wavenumber (truncated).
+   !> @param[in] kyLT Absolute smallest y wavenumber (truncated).
+   !> @param[in] kxMT Absolute largest x wavenumber (truncated).
+   !> @param[in] kyMT Absolute largest y wavenumber (truncated).
+   !> @param[in] kxLU Smallest useful x wavenumber.
+   !> @param[in] kyLU Smallest useful y wavenumber.
+   !> @param[in] kxMU Largest useful x wavenumber.
+   !> @param[in] kyMU Largest useful y wavenumber.
+   !> @param[in] Qw Current state vector for vorticity.
+   !> @param[out] Qp Current state vector for the streamfunction.
+   SUBROUTINE ComputePsi(kxLT, kyLT, kxMT, kyMT, &
+                         kxLU, kyLU, kxMU, kyMU, &
+                         Qw, Qp)
+      IMPLICIT NONE
+      ! Calling arguments.
+      INTEGER(KIND=IWPF),INTENT(IN) :: kxLT, kyLT, kxMT, kyMT
+      INTEGER(KIND=IWPF),INTENT(IN) :: kxLU, kyLU, kxMU, kyMU
+      COMPLEX(KIND=CWPC),DIMENSION(kxLT:kxMT,kyLT:kyMT),INTENT(IN) :: Qw
+      COMPLEX(KIND=CWPC),DIMENSION(kxLT:kxMT,kyLT:kyMT),INTENT(OUT) :: Qp
+      ! Local variables.
+      ! Looping indices for kx and ky wavenumbers.
+      INTEGER(KIND=IWPF) :: kx, ky
+
+      ! Loop over all useful wavenumbers and compute the streamfunction.
+      !
+      ! NOTE: revisit this in the future...there is divide by zero going on.
+      DO ky = kyLU, kyMU
+         DO kx = kxLU, kxMU
+            Qp(kx,ky) = Qw(kx,ky)/(REAL(kx, RWPC)**2 + REAL(ky, RWPC)**2)
+         END DO
+      END DO
+      !
+      ! Explicitly set the zero mode to zero, since this is indeterminant.
+      Qp(0,0) = (0.0_RWPC, 0.0_RWPC)
+   END SUBROUTINE ComputePsi
 
    !> Routine to differentiate a signal in the x direction.
    !!
