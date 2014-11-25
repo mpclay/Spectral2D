@@ -42,6 +42,8 @@ MODULE Parameters_m
    !
    !> Pi.
    REAL(KIND=RWPF),PARAMETER,PUBLIC :: PI = ACOS(-1.0_RWPF)
+   !> i = SQRT(-1).
+   COMPLEX(KIND=CWPC),PARAMETER,PUBLIC :: II = (0.0_RWPC, 1.0_RWPC)
 
 END MODULE Parameters_m
 

@@ -19,7 +19,41 @@
 !> @brief Time integration schemes.
 MODULE TimeIntegration_m
 
+   ! Required modules.
+   USE Parameters_m,ONLY: IWPC, IWPF, RWPC, RWPF, CWPC
+
    IMPLICIT NONE
+
+   ! Available time integrators.
+   !
+   !> TVD RK3 of Shu.
+   INTEGER(KIND=IWPF),PARAMETER,PUBLIC :: RK3_TVD_SHU = 1_IWPF
+
+   ! Module procedures.
+   PUBLIC :: TimeIntegrationSetup, IntegrateOneStep, ComputeTimeStep
+   PRIVATE :: RK3TVDTimeUpdate
+
+CONTAINS
+
+   !> Subroutine to set up the time integration module.
+   SUBROUTINE TimeIntegrationSetup()
+      IMPLICIT NONE
+   END SUBROUTINE TimeIntegrationSetup
+
+   !> Subroutine to advance one step in time.
+   SUBROUTINE IntegrateOneStep()
+      IMPLICIT NONE
+   END SUBROUTINE IntegrateOneStep
+
+   !> Subroutine to calculate the time step.
+   SUBROUTINE ComputeTimeStep()
+      IMPLICIT NONE
+   END SUBROUTINE ComputeTimeStep
+
+   !> Update one step of the RK3 TVD scheme of Shu.
+   SUBROUTINE RK3TVDTimeUpdate()
+      IMPLICIT NONE
+   END SUBROUTINE RK3TVDTimeUpdate
 
 END MODULE TimeIntegration_m
 

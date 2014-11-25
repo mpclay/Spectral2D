@@ -24,9 +24,12 @@ PROGRAM Spectral2D_p
    USE ISO_FORTRAN_ENV,ONLY: OUTPUT_UNIT
    USE MPI
    USE Parameters_m,ONLY: IWPF, RWPF, IWPC, RWPC, CWPC, PI
+   USE Alloc_m,ONLY: GetAllocSize, Alloc, Dealloc
    USE Spectral_m,ONLY: GetGridSize, SpectralSetup, SpectralFinalize, &
                         NO_DEALIASING, DEALIAS_3_2_RULE, DEALIAS_2_3_RULE, &
                         DEALIAS_GRID_SHIFT
+   USE TimeIntegration_m,ONLY: TimeIntegrationSetup, IntegrateOneStep, &
+                               ComputeTimeStep, RK3_TVD_SHU
 
    IMPLICIT NONE
 
@@ -41,6 +44,12 @@ PROGRAM Spectral2D_p
    INTEGER(KIND=IWPF),PARAMETER :: ny = 256_IWPF
    !> Dealiasing technique.
    INTEGER(KIND=IWPF),PARAMETER :: dealias = NO_DEALIASING
+   !> Physical viscosity.
+   REAL(KIND=RWPF),PARAMETER :: nu = 1.0e-3_RWPF
+   !> Time integration scheme.
+   INTEGER(KIND=IWPF),PARAMETER :: timeScheme = RK3_TVD_SHU
+   !> End time for the simulation.
+   REAL(KIND=RWPF),PARAMETER :: tEnd = 0.01_RWPF
 
    ! MPI related variables.
    !
@@ -71,12 +80,49 @@ PROGRAM Spectral2D_p
    INTEGER(KIND=IWPF) :: rISize
    !> Size of the i dimension for complex data arrays.
    INTEGER(KIND=IWPF) :: cISize
+   !> Lowest x wavenumber in the total allocated memory (may be truncated).
+   INTEGER(KIND=IWPF) :: kxLT
+   !> Lowest y wavenumber in the total allocated memory (may be truncated).
+   INTEGER(KIND=IWPF) :: kyLT
+   !> Maximum x wavenumber in the total allocated memory (may be truncated).
+   INTEGER(KIND=IWPF) :: kxMT
+   !> Maximum y wavenumber in the total allocated memory (may be truncated).
+   INTEGER(KIND=IWPF) :: kyMT
+   !> Lowest x wavenumber actually being used.
+   INTEGER(KIND=IWPF) :: kxLU
+   !> Lowest y wavenumber actually being used.
+   INTEGER(KIND=IWPF) :: kyLU
+   !> Maximum x wavenumber actually being used.
+   INTEGER(KIND=IWPF) :: kxMU
+   !> Maximum y wavenumber actually being used.
+   INTEGER(KIND=IWPF) :: kyMU
    !> Data array for the simulation.
    TYPE(C_PTR) :: Q
    !> Real cast of Q for working in physical space.
    REAL(KIND=RWPC),DIMENSION(:,:,:,:),POINTER :: Qr
    !> Complex cast of Q for working in spectral space.
    COMPLEX(KIND=CWPC),DIMENSION(:,:,:,:),POINTER :: Qc
+   !> Data array for the u velocity and nonlinear term.
+   TYPE(C_PTR) :: u
+   !> Real cast of u for working in physical space.
+   REAL(KIND=RWPC),DIMENSION(:,:),POINTER :: uR
+   !> Complex cast of u for working in spectral space.
+   COMPLEX(KIND=CWPC),DIMENSION(:,:),POINTER :: uC
+   !> Data array for the v velocity and nonlinear term.
+   TYPE(C_PTR) :: v
+   !> Real cast of v for working in physical space.
+   REAL(KIND=RWPC),DIMENSION(:,:),POINTER :: vR
+   !> Complex cast of v for working in spectral space.
+   COMPLEX(KIND=CWPC),DIMENSION(:,:),POINTER :: vC
+
+   ! Time stepping variables.
+   !
+   !> Current simulation time.
+   REAL(KIND=RWPF) :: time = 0.0_RWPF
+   !> Simulation time step.
+   REAL(KIND=RWPF) :: dt = 1.0e-6_RWPF
+   !> Current simluation step.
+   INTEGER(KIND=IWPF) :: nadv = 0_IWPF
 
    ! Extraneous variables.
    !
@@ -84,6 +130,8 @@ PROGRAM Spectral2D_p
    INTEGER(KIND=IWPF) :: i, j, m, n, p
    !> MPI error handling.
    INTEGER(KIND=IWPF) :: ierr
+   !> Logic to check when we exit time stepping.
+   LOGICAL :: loopBool, exitThisStep
 
    ! Initialize MPI.
    CALL MPI_INIT(ierr)
@@ -95,103 +143,58 @@ PROGRAM Spectral2D_p
 
    ! Determine the working number of grid points based on the dealiasing
    ! technique being used in the simulation.
-   CALL GetGridSize(nx, ny, dealias, nxW, nyW)
+   CALL GetGridSize(nx, ny, dealias, nxW, nyW, &
+                    kxLT, kyLT, kxMT, kyMT, &
+                    kxLU, kyLU, kxMU, kyMU)
 
    ! Allocate memory for the simulation, and get the local grid extents.
-   CALL Alloc(nxW, nyW, nVar, nStr, j1, j2, jSize, localJ, rISize, cISize, Q)
+   CALL GetAllocSize(nxW, nyW, j1, j2, jSize, localJ, rISize, cISize)
+   CALL Alloc(cISize, nyW, nVar, nStr, Q)
+   CALL Alloc(cISize, nyW, u)
+   CALL Alloc(cISize, nyW, v)
    !
    ! Create real and complex casts of Q for use in physical/spectral space.
    CALL C_F_POINTER(Q, Qr, [rISize,nyW,nVar,nStr])
    CALL C_F_POINTER(Q, Qc, [cISize,nyW,nVar,nStr])
    Qc(:,:,:,:) = (0.0_RWPC, 0.0_RWPC)
+   CALL C_F_POINTER(u, uR, [rISize,nyW])
+   CALL C_F_POINTER(u, uC, [cISize,nyW])
+   uC(:,:) = (0.0_RWPC, 0.0_RWPC)
+   CALL C_F_POINTER(v, vR, [rISize,nyW])
+   CALL C_F_POINTER(v, vC, [cISize,nyW])
+   vC(:,:) = (0.0_RWPC, 0.0_RWPC)
 
    ! Initialize the FFT module, which creates the FFTW plans.
    CALL SpectralSetup(nxW, nyW, rISize, cISize, nVar, nStr, Qr, Qc)
+
+   ! Enter the main time stepping loop.
+   loopBool = .TRUE.
+   exitThisStep = .FALSE.
+   tloop: DO WHILE (loopBool)
+      ! Increment the Q array by 1 time step.
+      !
+      ! NOTE: The only arrays that are correct after this step are Qr and Qc.
+
+      ! Increment the time and step counters.
+      time = time + dt
+      nadv = nadv + 1_IWPF
+
+      ! Evaluate the exit conditions.
+      IF (exitThisStep) THEN
+         EXIT tloop
+      END IF
+      !
+      ! Adjust the time step so the desired end time is reached.
+      IF (time + dt > tend) THEN
+         dt = tend - time
+         exitThisStep = .TRUE.
+      END IF
+   END DO tloop
 
    ! Finalize the program.
    CALL Dealloc(Q)
    CALL SpectralFinalize()
    CALL MPI_FINALIZE(ierr)
-
-CONTAINS
-
-   !> Procedure to allocate working arrays.
-   !!
-   !> @param[in] nxW Working number of grid points in the x direction.
-   !> @param[in] nyW Working number of grid points in the y direction.
-   !> @param[in] nVar Number of variables in the simulation.
-   !> @param[in] nStr Required number of storage arrays for time integration.
-   !> @param[out] j1 Starting j index for this process.
-   !> @param[out] j2 Ending j index for this process.
-   !> @param[out] jSize Number of j columns owned by this MPI process.
-   !> @param[out] localJ Offset for j based on FFTW MPI decomposition.
-   !> @param[out] rISize Size of i-dimension for real data array.
-   !> @param[out] cISize Size of i-dimension for complex data array.
-   !> @param[in,out] Q Data array for the simulation.
-   SUBROUTINE Alloc(nxW, nyW, nVar, nStr, j1, j2, jSize, localJ, &
-                    rISize, cISize, Q)
-      ! Required modules.
-      USE ISO_C_BINDING
-      USE MPI,ONLY: MPI_COMM_WORLD
-      IMPLICIT NONE
-      INCLUDE 'fftw3-mpi.f03'
-      ! Calling arguments.
-      INTEGER(KIND=IWPF),INTENT(IN) :: nxW, nyW, nVar, nStr
-      INTEGER(KIND=IWPF),INTENT(OUT) :: j1, j2, jSize, localJ, rISize, cISize
-      TYPE(C_PTR),INTENT(INOUT) :: Q
-      ! Local variables.
-      ! Size of working array for this process as determined by FFTW.
-      INTEGER(KIND=IWPC) :: allocLocal
-      ! Local starting index for this task's portion of the data.
-      INTEGER(KIND=IWPC) :: localJ_
-      ! Number of columns (starting from localJ) this process owns.
-      INTEGER(KIND=IWPC) :: jSize_
-
-      ! Determine number of columns this MPI task gets for the FFTs. The
-      ! dimensions are reversed because a C routine is being called.
-      allocLocal = FFTW_MPI_LOCAL_SIZE_2D(INT(nyW, IWPC), &
-                                          INT(nxW, IWPC), &
-                                          MPI_COMM_WORLD, &
-                                          jSize_, localJ_)
-      !
-      ! The j array bounds for this process.
-      j1 = INT(localJ_, IWPF) + 1_IWPF
-      j2 = INT(localJ_ + jSize_, IWPF)
-      !
-      ! Determine the size of the arrays for in-place transforms.
-      rISize = 2_IWPF*(nxW/2_IWPF + 1_IWPF)
-      cISize = nxW/2_IWPF + 1_IWPF
-
-      ! Main memory allocation.
-      !
-      ! Each array is allocated by FFTW for complex data. Each array has
-      ! dimensions:
-      !
-      !     (cISize=size of the i dimension in spectral space) X
-      !     (nyW=size of the j dimension in physical/spectral space) X
-      !     (nVar=number of variables in the simulation) X
-      !     (nStr=number of storage sites for time integration).
-      Q = FFTW_ALLOC_COMPLEX(INT(cISize*nyW*nVar*nStr, C_SIZE_T))
-
-      ! Subroutine outputs back to the calling code in the proper type.
-      jSize = INT(jSize_, IWPF)
-      localJ = INT(localJ_, IWPF)
-   END SUBROUTINE Alloc
-
-   !> Routine to free memory for the simulation.
-   !!
-   !> @param[in,out] Q Working array for the simulation.
-   SUBROUTINE Dealloc(Q)
-      ! Required modules.
-      USE ISO_C_BINDING
-      IMPLICIT NONE
-      INCLUDE 'fftw3-mpi.f03'
-      ! Calling arguments.
-      TYPE(C_PTR),INTENT(INOUT) :: Q
-
-      ! Free memory using FFTW routines.
-      CALL FFTW_FREE(Q)
-   END SUBROUTINE Dealloc
 
 END PROGRAM Spectral2D_p
 
