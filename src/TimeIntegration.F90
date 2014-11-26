@@ -57,23 +57,17 @@ CONTAINS
    !> @param[in] scheme_ Which time integration scheme to use.
    !> @param[in] cISize Size of i dimension for complex numbers.
    !> @param[in] rISize Size of i dimension for real numbers.
-   !> @param[in] nyW Working number of grid points in the y direction.
-   !> @param[in] kxLU Smallest useful x wavenumber.
-   !> @param[in] kyLU Smallest useful y wavenumber.
-   !> @param[in] kxMU Largest useful x wavenumber.
-   !> @param[in] kyMU Largest useful y wavenumber.
+   !> @param[in] nyG Global number of grid points in the y direction.
    !> @param[out] nStg Number of stages needed for time integration scheme.
    !> @param[out] cS Location in Q for this time stage.
    !> @param[out] nS Location in Q for next time stage.
-   SUBROUTINE TimeIntegrationSetup(scheme_, rISize, cISize, nyW, &
-                                   kxLU, kyLU, kxMU, kyMU, nStg, cS, nS)
+   SUBROUTINE TimeIntegrationSetup(scheme_, rISize, cISize, nyG, nStg, cS, nS)
       ! Required modules.
       USE ISO_C_BINDING,ONLY: C_F_POINTER
       USE Alloc_m,ONLY: Alloc
       IMPLICIT NONE
       ! Calling arguments.
-      INTEGER(KIND=IWPF),INTENT(IN) :: scheme_, rISize, cISize, nyw
-      INTEGER(KIND=IWPF),INTENT(IN) :: kxLU, kyLU, kxMU, kyMU
+      INTEGER(KIND=IWPF),INTENT(IN) :: scheme_, rISize, cISize, nyG
       INTEGER(KIND=IWPF),INTENT(OUT) :: nStg, cS, nS
 
       ! Set which scheme we are going to use.
@@ -89,10 +83,10 @@ CONTAINS
       END SELECT
 
       ! Allocate memory for scratch arrays.
-      CALL Alloc(cISize, nyW, kxLU, kyLU, dQ)
-      CALL Alloc(cISize, nyW, w)
-      CALL C_F_POINTER(w, wR, [rISize,nyW])
-      CALL C_F_POINTER(w, wC, [cISize,nyW])
+      CALL Alloc(cISize, nyG, 1_IWPF, 1_IWPF, dQ)
+      CALL Alloc(cISize, nyG, w)
+      CALL C_F_POINTER(w, wR, [rISize,nyG])
+      CALL C_F_POINTER(w, wC, [cISize,nyG])
    END SUBROUTINE TimeIntegrationSetup
 
    !> Subroutine to advance one step in time.
@@ -145,76 +139,76 @@ CONTAINS
       ! Looping indices for wavenumbers.
       INTEGER(KIND=IWPF) :: kx, ky
 
-      ! Zero out everything in the next stage holder and dQ.
-      Qc(:,:,:,nS) = (0.0_RWPC, 0.0_RWPC)
-      dQ(:,:) = (0.0_RWPC, 0.0_RWPC)
-
-      ! Calculate the RHS with the data at the start of the time step.
-      CALL ComputeRHS(rISize, nxW, nyW, &
-                      kxLT, kyLT, kxMT, kyMT, &
-                      kxLU, kyLU, kxMU, kyMU, &
-                      Qc(:,:,:,cS), nu, &
-                      uC, vC, wC, uR, vR, wR, dQ)
-      !
-      ! Determine omega at the first intermediate RK stage.
-      DO ky = kyLU, kyMU
-         DO kx = kxLU, kxMU
-            Qc(kx,ky,1,nS) = Qc(kx,ky,1,cS) + dt*dQ(kx,ky)
-         END DO
-      END DO
-      !
-      ! Now with vorticity updated, solve for the streamfunction.
-      CALL ComputePsi(kxLT, kyLT, kxMT, kyMT, &
-                      kxLU, kyLU, kxMU, kyMU, &
-                      Qc(:,:,1,nS), Qc(:,:,2,nS))
-
-      ! Calculate the RHS using the first intermediate stage.
-      dQ(:,:) = (0.0_RWPC, 0.0_RWPC)
-      CALL ComputeRHS(rISize, nxW, nyW, &
-                      kxLT, kyLT, kxMT, kyMT, &
-                      kxLU, kyLU, kxMU, kyMU, &
-                      Qc(:,:,:,nS), nu, &
-                      uC, vC, wC, uR, vR, wR, dQ)
-      !
-      ! Determine the vorticity at the second intermediate RK stage.
-      DO ky = kyLU, kyMU
-         DO kx = kxLU, kxMU
-            Qc(kx,ky,1,nS) = 0.75_RWPC*Qc(kx,ky,1,cS) + &
-                             0.25_RWPC*Qc(kx,ky,1,nS) + &
-                             0.25_RWPC*dt*dq(kx,ky)
-         END DO
-      END DO
-      !
-      ! Now with vorticity updated, solve for the streamfunction.
-      CALL ComputePsi(kxLT, kyLT, kxMT, kyMT, &
-                      kxLU, kyLU, kxMU, kyMU, &
-                      Qc(:,:,1,nS), Qc(:,:,2,nS))
-
-      ! Calculate the RHS using the second intermediate stage.
-      dQ(:,:) = (0.0_RWPC, 0.0_RWPC)
-      CALL ComputeRHS(rISize, nxW, nyW, &
-                      kxLT, kyLT, kxMT, kyMT, &
-                      kxLU, kyLU, kxMU, kyMU, &
-                      Qc(:,:,:,nS), nu, &
-                      uC, vC, wC, uR, vR, wR, dQ)
-      !
-      ! Determine the vorticity at the next time step.
-      DO ky = kyLU, kyMU
-         DO kx = kxLU, kxMU
-            Qc(kx,ky,1,cS) = Qc(kx,ky,1,cS)/3.0_RWPC + &
-                             2.0_RWPC*Qc(kx,ky,1,nS)/3.0_RWPC + &
-                             dt*2.0_RWPC*dQ(kx,ky)/3.0_RWPC
-         END DO
-      END DO
-      !
-      ! Now with vorticity updated, solve for the streamfunction.
-      CALL ComputePsi(kxLT, kyLT, kxMT, kyMT, &
-                      kxLU, kyLU, kxMU, kyMU, &
-                      Qc(:,:,1,cS), Qc(:,:,2,cS))
-
-      ! For this low-storage scheme we do not change cS from 1.
-      cS = 1_IWPF
-      nS = 2_IWPF
+!      ! Zero out everything in the next stage holder and dQ.
+!      Qc(:,:,:,nS) = (0.0_RWPC, 0.0_RWPC)
+!      dQ(:,:) = (0.0_RWPC, 0.0_RWPC)
+!
+!      ! Calculate the RHS with the data at the start of the time step.
+!      CALL ComputeRHS(rISize, nxW, nyW, &
+!                      kxLT, kyLT, kxMT, kyMT, &
+!                      kxLU, kyLU, kxMU, kyMU, &
+!                      Qc(:,:,:,cS), nu, &
+!                      uC, vC, wC, uR, vR, wR, dQ)
+!      !
+!      ! Determine omega at the first intermediate RK stage.
+!      DO ky = kyLU, kyMU
+!         DO kx = kxLU, kxMU
+!            Qc(kx,ky,1,nS) = Qc(kx,ky,1,cS) + dt*dQ(kx,ky)
+!         END DO
+!      END DO
+!      !
+!      ! Now with vorticity updated, solve for the streamfunction.
+!      CALL ComputePsi(kxLT, kyLT, kxMT, kyMT, &
+!                      kxLU, kyLU, kxMU, kyMU, &
+!                      Qc(:,:,1,nS), Qc(:,:,2,nS))
+!
+!      ! Calculate the RHS using the first intermediate stage.
+!      dQ(:,:) = (0.0_RWPC, 0.0_RWPC)
+!      CALL ComputeRHS(rISize, nxW, nyW, &
+!                      kxLT, kyLT, kxMT, kyMT, &
+!                      kxLU, kyLU, kxMU, kyMU, &
+!                      Qc(:,:,:,nS), nu, &
+!                      uC, vC, wC, uR, vR, wR, dQ)
+!      !
+!      ! Determine the vorticity at the second intermediate RK stage.
+!      DO ky = kyLU, kyMU
+!         DO kx = kxLU, kxMU
+!            Qc(kx,ky,1,nS) = 0.75_RWPC*Qc(kx,ky,1,cS) + &
+!                             0.25_RWPC*Qc(kx,ky,1,nS) + &
+!                             0.25_RWPC*dt*dq(kx,ky)
+!         END DO
+!      END DO
+!      !
+!      ! Now with vorticity updated, solve for the streamfunction.
+!      CALL ComputePsi(kxLT, kyLT, kxMT, kyMT, &
+!                      kxLU, kyLU, kxMU, kyMU, &
+!                      Qc(:,:,1,nS), Qc(:,:,2,nS))
+!
+!      ! Calculate the RHS using the second intermediate stage.
+!      dQ(:,:) = (0.0_RWPC, 0.0_RWPC)
+!      CALL ComputeRHS(rISize, nxW, nyW, &
+!                      kxLT, kyLT, kxMT, kyMT, &
+!                      kxLU, kyLU, kxMU, kyMU, &
+!                      Qc(:,:,:,nS), nu, &
+!                      uC, vC, wC, uR, vR, wR, dQ)
+!      !
+!      ! Determine the vorticity at the next time step.
+!      DO ky = kyLU, kyMU
+!         DO kx = kxLU, kxMU
+!            Qc(kx,ky,1,cS) = Qc(kx,ky,1,cS)/3.0_RWPC + &
+!                             2.0_RWPC*Qc(kx,ky,1,nS)/3.0_RWPC + &
+!                             dt*2.0_RWPC*dQ(kx,ky)/3.0_RWPC
+!         END DO
+!      END DO
+!      !
+!      ! Now with vorticity updated, solve for the streamfunction.
+!      CALL ComputePsi(kxLT, kyLT, kxMT, kyMT, &
+!                      kxLU, kyLU, kxMU, kyMU, &
+!                      Qc(:,:,1,cS), Qc(:,:,2,cS))
+!
+!      ! For this low-storage scheme we do not change cS from 1.
+!      cS = 1_IWPF
+!      nS = 2_IWPF
    END SUBROUTINE IntegrateOneStep
 
    !> Subroutine to calculate the time step.

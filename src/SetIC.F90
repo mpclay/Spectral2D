@@ -36,73 +36,54 @@ CONTAINS
 
    !> Procedure to set the initial condition to u(x,y) = cos(y).
    !!
+   !> @param[in] nxG Number of grid points in the x direction.
+   !> @param[in] nyG Number of grid points in the y direction.
    !> @param[in] rISize Size of i dimension for real numbers.
    !> @param[in] cISize Size of i dimension for complex numbers.
-   !> @param[in] nxW Number of grid points in the x direction.
-   !> @param[in] nyW Number of grid points in the y direction.
-   !> @param[in] kxLT Absolute smallest x wavenumber (truncated).
-   !> @param[in] kyLT Absolute smallest y wavenumber (truncated).
-   !> @param[in] kxMT Absolute largest x wavenumber (truncated).
-   !> @param[in] kyMT Absolute largest y wavenumber (truncated).
-   !> @param[in] kxLU Smallest useful x wavenumber.
-   !> @param[in] kyLU Smallest useful y wavenumber.
-   !> @param[in] kxMU Largest useful x wavenumber.
-   !> @param[in] kyMU Largest useful y wavenumber.
-   !> @param[in] nVar Number of variables in Q.
-   !> @param[in] nStg Number of stages in Q for time stepping.
+   !> @param[in] kxG Array of wavenumbers in the x direction.
+   !> @param[in] kyG Array of wavenumbers in the y direction.
    !> @param[in] uC Complex cast of u velocity array.
    !> @param[in] uR Real cast of u velocity array.
    !> @param[in] vC Complex cast of v velocity array.
    !> @param[in] vR Real cast of v velocity array.
-   !> @param[in] Qc Complex cast of Q array.
-   !> @param[in] Qr Real cast of Q array.
-   SUBROUTINE SetICCosineShearX(rISize, cISize, nxW, nyW, &
-                                kxLT, kyLT, kxMT, kyMT, &
-                                kxLU, kyLU, kxMU, kyMU, &
-                                nVar, nStg, &
-                                uC, uR, vC, vR, Qc, Qr)
+   !> @param[in] wC Complex cast of vorticity array.
+   !> @param[in] wR Real cast of vorticity array.
+   !> @param[in] psiC Complex cast of streamfunction array.
+   !> @param[in] psiR Real cast of streamfunction array.
+   SUBROUTINE SetICCosineShearX(nxG, nyG, rISize, cISize, kxG, kyG, &
+                                uC, uR, vC, vR, wC, wR, psiC, psiR)
       ! Required modules.
       USE Parameters_m,ONLY: PI
-      USE Spectral_m,ONLY: ComputeRHS, ComputePsi, TransformR2C, DuDy
+      USE Spectral_m,ONLY: ComputeVorticity, ComputePsi, TransformR2C
       IMPLICIT NONE
       ! Calling arguments.
-      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, cISize, nxW, nyW
-      INTEGER(KIND=IWPF),INTENT(IN) :: kxLT, kyLT, kxMT, kyMT
-      INTEGER(KIND=IWPF),INTENT(IN) :: kxLU, kyLU, kxMU, kyMU
-      INTEGER(KIND=IWPF),INTENT(IN) :: nVar, nStg
-      COMPLEX(KIND=CWPC),DIMENSION(kxLT:kxMT,kyLT:kyMT),INTENT(INOUT) :: uC, vC
-      REAL(KIND=RWPC),DIMENSION(rISize,nyW),INTENT(INOUT) :: uR, vR
-      COMPLEX(CWPC),DIMENSION(kxLT:kxMT,kyLT:kyMT,nVar,nStg),INTENT(INOUT) :: Qc
-      REAL(KIND=RWPC),DIMENSION(rISize,nyW,nVar,nStg),INTENT(INOUT) :: Qr
+      INTEGER(KIND=IWPF),INTENT(IN) :: nxG, nyG, rISize, cISize
+      INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxG
+      INTEGER(KIND=IWPF),DIMENSION(nyG),INTENT(IN) :: kyG
+      COMPLEX(KIND=CWPC),DIMENSION(cISize,nyG),INTENT(INOUT) :: uC, vC, wC, psiC
+      REAL(KIND=RWPC),DIMENSION(rISize,nyG),INTENT(INOUT) :: uR, vR, wR, psiR
       ! Local variables.
       ! Looping indices for physical space.
       INTEGER(KIND=IWPF) :: i, j
-      ! Looping indices for spectral space.
-      INTEGER(KIND=IWPF) :: kx, ky
-      ! Masked wavenumber for differentiation.
-      INTEGER(KIND=IWPF),DIMENSION(1) :: kyMask
 
       ! Loop over the physical grid points and fill in the velocity profile.
-      DO j = 1, nyW
-         DO i = 1, nxW
-            uR(i,j) = COS(REAL(j, RWPC)*2.0_RWPC*REAL(PI, RWPC)/REAL(nyW, RWPC))
+      DO j = 1, nyG
+         DO i = 1, nxG
+            uR(i,j) = COS(REAL(j, RWPC)*2.0_RWPC*REAL(PI, RWPC)/REAL(nyG, RWPC))
          END DO
       END DO
       !
       ! Transform the signal to spectral space.
-      CALL TransformR2C(nxW, nyW, rISize, cISize, uR, uC)
+      CALL TransformR2C(nxG, nyG, rISize, cISize, uR, uC)
+      CALL TransformR2C(nxG, nyG, rISize, cISize, vR, vC)
       !
       ! Truncate the signal to the useful wavenubers.
       !
       ! Differentiate the signal to form the vorticity.
-      kyMask(1) = kyMU
-      CALL DuDy(kxLT, kxMT, kyLT, kyMT, kxLU, kxMU, kyLU, kyMU, &
-                1_IWPF, kyMask, uC, Qc(:,:,1,1))
+      CALL ComputeVorticity(nxG, nyG, cISize, kxG, kyG, uC, vC, wC)
       !
       ! Solve for the streamfunction based on the vorticity.
-      CALL ComputePsi(kxLT, kyLT, kxMT, kyMT, &
-                      kxLU, kyLU, kxMU, kyMU, &
-                      Qc(:,:,1,1), Qc(:,:,2,1))
+      CALL ComputePsi(cISize, nyG, kxG, kyG, wC, psiC)
    END SUBROUTINE SetICCosineShearX
 
 END MODULE SetIC_m

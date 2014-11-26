@@ -48,9 +48,7 @@ CONTAINS
    !> @param[out] j2 Ending j index for this process.
    !> @param[out] jSize Number of j columns owned by this MPI process.
    !> @param[out] localJ Offset for j based on FFTW MPI decomposition.
-   !> @param[out] rISize Size of i-dimension for real data array.
-   !> @param[out] cISize Size of i-dimension for complex data array.
-   SUBROUTINE GetAllocSize(nxW, nyW, j1, j2, jSize, localJ, rISize, cISize)
+   SUBROUTINE GetAllocSize(nxW, nyW, j1, j2, jSize, localJ)
       ! Required modules.
       USE ISO_C_BINDING
       USE MPI,ONLY: MPI_COMM_WORLD
@@ -58,7 +56,7 @@ CONTAINS
       INCLUDE 'fftw3-mpi.f03'
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: nxW, nyW
-      INTEGER(KIND=IWPF),INTENT(OUT) :: j1, j2, jSize, localJ, rISize, cISize
+      INTEGER(KIND=IWPF),INTENT(OUT) :: j1, j2, jSize, localJ
       ! Local variables.
       ! Size of working array for this process as determined by FFTW.
       INTEGER(KIND=IWPC) :: allocLocal
@@ -78,10 +76,6 @@ CONTAINS
       j1 = INT(localJ_, IWPF) + 1_IWPF
       j2 = INT(localJ_ + jSize_, IWPF)
       !
-      ! Determine the size of the arrays for in-place transforms.
-      rISize = 2_IWPF*(nxW/2_IWPF + 1_IWPF)
-      cISize = nxW/2_IWPF + 1_IWPF
-
       ! Subroutine outputs back to the calling code in the proper type.
       jSize = INT(jSize_, IWPF)
       localJ = INT(localJ_, IWPF)

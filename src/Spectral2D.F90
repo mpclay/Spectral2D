@@ -26,13 +26,13 @@ PROGRAM Spectral2D_p
    USE Parameters_m,ONLY: IWPF, RWPF, IWPC, RWPC, CWPC, PI
    USE Alloc_m,ONLY: GetAllocSize, Alloc, Dealloc
    USE Spectral_m,ONLY: GetGridSize, SpectralSetup, SpectralFinalize, &
-                        NO_DEALIASING, DEALIAS_3_2_RULE, DEALIAS_2_3_RULE, &
-                        DEALIAS_GRID_SHIFT
+                        TransformR2C, TransformC2R, ComputeVelocity, &
+                        NO_DEALIASING, DEALIAS_3_2_RULE, DEALIAS_2_3_RULE
    USE TimeIntegration_m,ONLY: TimeIntegrationSetup, IntegrateOneStep, &
                                ComputeTimeStep, RK3_TVD_SHU
    USE SetIC_m,ONLY: SetICCosineShearX, COSINE_SHEAR_X
-   USE IO_m,ONLY: FileName, WriteGridPlot3d, WriteRestartPlot3d, &
-                  FILE_NAME_LENGTH
+   USE IO_m,ONLY: FileName, WriteGridHDF5, WriteRestart, FILE_NAME_LENGTH, &
+                  HDF5_OUTPUT
 
    IMPLICIT NONE
 
@@ -67,12 +67,8 @@ PROGRAM Spectral2D_p
    !> Number of processes in MPI_COMM_WORLD.
    INTEGER(KIND=IWPF) :: nprc
 
-   ! Variables required for simulation.
+   ! Variables related to number of variables, storage size, etc.
    !
-   !> Working number of grid points in the x direction.
-   INTEGER(KIND=IWPF) :: nxW
-   !> Working number of grid points in the y direction.
-   INTEGER(KIND=IWPF) :: nyW
    !> Number of variables in the Q array for the simulation.
    INTEGER(KIND=IWPF) :: nVar = 2_IWPF
    !> Number of storage locations for time integration.
@@ -81,6 +77,36 @@ PROGRAM Spectral2D_p
    INTEGER(KIND=IWPF) :: cS
    !> Index for the next stage in time in the Q array.
    INTEGER(KIND=IWPF) :: nS
+   !
+   ! Global grid and wavenumber variables.
+   !
+   !> Total number of grid points in the x direction.
+   INTEGER(KIND=IWPF) :: nxG
+   !> Total number of grid points in the y direction.
+   INTEGER(KIND=IWPF) :: nyG
+   !> Lowest x wavenumber in the total allocated memory.
+   INTEGER(KIND=IWPF) :: kxLG
+   !> Lowest y wavenumber in the total allocated memory.
+   INTEGER(KIND=IWPF) :: kyLG
+   !> Maximum x wavenumber in the total allocated memory.
+   INTEGER(KIND=IWPF) :: kxMG
+   !> Maximum y wavenumber in the total allocated memory.
+   INTEGER(KIND=IWPF) :: kyMG
+   !> Lowest x wavenumber actually being used.
+   INTEGER(KIND=IWPF) :: kxLU
+   !> Lowest y wavenumber actually being used.
+   INTEGER(KIND=IWPF) :: kyLU
+   !> Maximum x wavenumber actually being used.
+   INTEGER(KIND=IWPF) :: kxMU
+   !> Maximum y wavenumber actually being used.
+   INTEGER(KIND=IWPF) :: kyMU
+   !> Array of wavenumbers in the x direction.
+   INTEGER(KIND=IWPF),DIMENSION(:),ALLOCATABLE :: kxG
+   !> Array of wavenumbers in the y direction.
+   INTEGER(KIND=IWPF),DIMENSION(:),ALLOCATABLE :: kyG
+   !
+   ! Local grid and wavenumber variables.
+   !
    !> Number of j columns given to this process by FFTW.
    INTEGER(KIND=IWPF) :: jSize
    !> Local j offset based on FFTW decomposition.
@@ -93,22 +119,9 @@ PROGRAM Spectral2D_p
    INTEGER(KIND=IWPF) :: rISize
    !> Size of the i dimension for complex data arrays.
    INTEGER(KIND=IWPF) :: cISize
-   !> Lowest x wavenumber in the total allocated memory (may be truncated).
-   INTEGER(KIND=IWPF) :: kxLT
-   !> Lowest y wavenumber in the total allocated memory (may be truncated).
-   INTEGER(KIND=IWPF) :: kyLT
-   !> Maximum x wavenumber in the total allocated memory (may be truncated).
-   INTEGER(KIND=IWPF) :: kxMT
-   !> Maximum y wavenumber in the total allocated memory (may be truncated).
-   INTEGER(KIND=IWPF) :: kyMT
-   !> Lowest x wavenumber actually being used.
-   INTEGER(KIND=IWPF) :: kxLU
-   !> Lowest y wavenumber actually being used.
-   INTEGER(KIND=IWPF) :: kyLU
-   !> Maximum x wavenumber actually being used.
-   INTEGER(KIND=IWPF) :: kxMU
-   !> Maximum y wavenumber actually being used.
-   INTEGER(KIND=IWPF) :: kyMU
+   !
+   ! Main working arrays for the simulation.
+   !
    !> Data array for the simulation.
    TYPE(C_PTR) :: Q
    !> Real cast of Q for working in physical space.
@@ -127,7 +140,7 @@ PROGRAM Spectral2D_p
    REAL(KIND=RWPC),DIMENSION(:,:),POINTER :: vR
    !> Complex cast of v for working in spectral space.
    COMPLEX(KIND=CWPC),DIMENSION(:,:),POINTER :: vC
-
+   !
    ! Time stepping variables.
    !
    !> Current simulation time.
@@ -164,116 +177,115 @@ PROGRAM Spectral2D_p
 
    ! Determine the working number of grid points based on the dealiasing
    ! technique being used in the simulation.
-   CALL GetGridSize(nx, ny, dealias, nxW, nyW, &
-                    kxLT, kyLT, kxMT, kyMT, &
-                    kxLU, kyLU, kxMU, kyMU)
+   CALL GetGridSize(nx, ny, dealias, nxG, nyG, &
+                    kxLG, kyLG, kxMG, kyMG, &
+                    kxLU, kyLU, kxMU, kyMU, &
+                    rISize, cISize, kxG, kyG)
+
+   ! Write out the grid.
+   CALL FileName('GRID', 'h5', fname)
+   CALL WriteGridHDF5(MPI_COMM_WORLD, rank, fname, nxG, nyG, nxG, nyG, &
+                      1_IWPF, nxG, 1_IWPF, nyG)
 
    ! Get the allocation sizes as determined by FFTW.
-   CALL GetAllocSize(nxW, nyW, j1, j2, jSize, localJ, rISize, cISize)
+   CALL GetAllocSize(nxG, nyG, j1, j2, jSize, localJ)
 
    ! Initialize the time integration module. This also sets nStg for Q.
-   CALL TimeIntegrationSetup(timeScheme, rISize, cISize, nyW, &
-                             kxLU, kyLU, kxMU, kyMU, nStg, cS, nS)
+   CALL TimeIntegrationSetup(timeScheme, rISize, cISize, nyG, nStg, cS, nS)
 
    ! Allocate memory for the simulation.
-   CALL Alloc(cISize, nyW, nVar, nStg, Q)
-   CALL Alloc(cISize, nyW, u)
-   CALL Alloc(cISize, nyW, v)
+   CALL Alloc(cISize, nyG, nVar, nStg, Q)
+   CALL Alloc(cISize, nyG, u)
+   CALL Alloc(cISize, nyG, v)
    !
    ! Create real and complex casts of Q for use in physical/spectral space.
-   CALL C_F_POINTER(Q, Qr, [rISize,nyW,nVar,nStg])
-   CALL C_F_POINTER(Q, Qc, [cISize,nyW,nVar,nStg])
+   CALL C_F_POINTER(Q, Qr, [rISize,nyG,nVar,nStg])
+   CALL C_F_POINTER(Q, Qc, [cISize,nyG,nVar,nStg])
    Qc(:,:,:,:) = (0.0_RWPC, 0.0_RWPC)
-   CALL C_F_POINTER(u, uR, [rISize,nyW])
-   CALL C_F_POINTER(u, uC, [cISize,nyW])
+   CALL C_F_POINTER(u, uR, [rISize,nyG])
+   CALL C_F_POINTER(u, uC, [cISize,nyG])
    uC(:,:) = (0.0_RWPC, 0.0_RWPC)
-   CALL C_F_POINTER(v, vR, [rISize,nyW])
-   CALL C_F_POINTER(v, vC, [cISize,nyW])
+   CALL C_F_POINTER(v, vR, [rISize,nyG])
+   CALL C_F_POINTER(v, vC, [cISize,nyG])
    vC(:,:) = (0.0_RWPC, 0.0_RWPC)
 
    ! Initialize the FFT module, which creates the FFTW plans.
-   CALL SpectralSetup(nxW, nyW, rISize, cISize, nVar, nStg, Qr, Qc)
+   CALL SpectralSetup(nxG, nyG, rISize, cISize, nVar, nStg, Qr, Qc)
 
    ! Set the initial conditions.
    SELECT CASE (ics)
       CASE (COSINE_SHEAR_X)
-         CALL SetICCosineShearX(rISize, cISize, nxW, nyW, &
-                                kxLT, kyLT, kxMT, kyMT, &
-                                kxLU, kyLU, kxMU, kyMU, &
-                                nVar, nStg, &
-                                uC, uR, vC, vR, Qc, Qr)
+         CALL SetICCosineShearX(nxG, nyG, rISize, cISize, kxG, kyG, &
+                                uC, uR, vC, vR, Qc(:,:,1,1), Qr(:,:,1,1), &
+                                Qc(:,:,2,1), Qr(:,:,2,1))
       CASE DEFAULT
    END SELECT
    !
-   ! Write out the grid and the initial conditions.
-   CALL WriteGridPlot3d(nxW, nyW)
-   CALL FileName('REST', 0, 'f', fname)
-   CALL WriteRestartPlot3d(rISize, cISize, nxW, nyW, &
-                           kxLT, kyLT, kxMT, kyMT, &
-                           kxLU, kyLU, kxMU, kyMU, &
-                           nVar, nStg, cS, &
-                           uC, uR, vC, vR, Qc, Qr, fname)
-   STOP
+   ! Write out a restart file.
+   CALL WriteRestart(nxG, nyG, nxG, nyG, 1_IWPF, 1_IWPF, 1_IWPF, 1_IWPF, &
+                     rISize, cISize, kxG, kyG, rank, 0_IWPF, HDF5_OUTPUT, &
+                     uC, uR, vC, vR, Qc(:,:,1,1), Qr(:,:,1,1), &
+                     Qc(:,:,2,1), Qr(:,:,2,1))
 
-   ! Enter the main time stepping loop.
-   loopBool = .TRUE.
-   exitThisStep = .FALSE.
-   tloop: DO WHILE (loopBool)
-      ! Increment the Q array by 1 time step.
-      !
-      ! NOTE: The only arrays that are correct after this step are Qr and Qc.
-      CALL IntegrateOneStep(rISize, cISize, nxW, nyW, &
-                            kxLT, kyLT, kxMT, kyMT, &
-                            kxLU, kyLU, kxMU, kyMU, &
-                            nu, dt, &
-                            nVar, nStg, cS, nS, &
-                            uC, uR, vC, vR, Qc, Qr)
-
-      ! Increment the time and step counters.
-      time = time + dt
-      nadv = nadv + 1_IWPF
-
-      ! Compute the next time step.
-      CALL ComputeTimeStep()
-
-      ! Check whether or not we will write out data to file.
-      IF (writeBool) THEN
-         writeTime = writeTime + writePeriod
-         writeBool = .FALSE.
-      ELSE
-         IF (time + dt >= writeTime) THEN
-            writeBool = .TRUE.
-         END IF
-      END IF
-
-      ! Check whether or not we will print information to the user.
-      IF (printBool .OR. exitThisStep) THEN
-         printTime = printTime + printPeriod
-         printBool = .FALSE.
-         WRITE(*,500) 'Simulation step number: ', nadv, &
-                      '; Simulation time: ', time, &
-                      '; Max W: ', MAXVAL(ABS(Qc(:,:,1,cS))), &
-                      '; Min W: ', MINVAL(ABS(Qc(:,:,1,cS))), &
-                      '; Max Psi: ', MAXVAL(ABS(Qc(:,:,2,cS))), &
-                      '; Min Psi: ', MINVAL(ABS(Qc(:,:,2,cS)))
-         500 FORMAT (A,I8.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8)
-      ELSE
-         IF (time + dt >= printTime) THEN
-            printBool = .TRUE.
-         END IF
-      END IF
-
-      ! Evaluate the exit conditions.
-      IF (exitThisStep) THEN
-         EXIT tloop
-      END IF
-      !
-      ! Adjust the time step so the desired end time is reached.
-      IF (time + dt > tend) THEN
-         dt = tend - time
-         exitThisStep = .TRUE.
-      END IF
-   END DO tloop
+!   ! Enter the main time stepping loop.
+!   loopBool = .TRUE.
+!   exitThisStep = .FALSE.
+!   tloop: DO WHILE (loopBool)
+!      ! Increment the Q array by 1 time step.
+!      !
+!      ! NOTE: The only arrays that are correct after this step are Qr and Qc.
+!      CALL IntegrateOneStep(rISize, cISize, nxW, nyW, &
+!                            kxLT, kyLT, kxMT, kyMT, &
+!                            kxLU, kyLU, kxMU, kyMU, &
+!                            nu, dt, &
+!                            nVar, nStg, cS, nS, &
+!                            uC, uR, vC, vR, Qc, Qr)
+!
+!      ! Increment the time and step counters.
+!      time = time + dt
+!      nadv = nadv + 1_IWPF
+!
+!      ! Compute the next time step.
+!      CALL ComputeTimeStep()
+!
+!      ! Check whether or not we will write out data to file.
+!      IF (writeBool) THEN
+!         writeTime = writeTime + writePeriod
+!         writeBool = .FALSE.
+!      ELSE
+!         IF (time + dt >= writeTime) THEN
+!            writeBool = .TRUE.
+!         END IF
+!      END IF
+!
+!      ! Check whether or not we will print information to the user.
+!      IF (printBool .OR. exitThisStep) THEN
+!         printTime = printTime + printPeriod
+!         printBool = .FALSE.
+!         WRITE(*,500) 'Simulation step number: ', nadv, &
+!                      '; Simulation time: ', time, &
+!                      '; Max W: ', MAXVAL(ABS(Qc(:,:,1,cS))), &
+!                      '; Min W: ', MINVAL(ABS(Qc(:,:,1,cS))), &
+!                      '; Max Psi: ', MAXVAL(ABS(Qc(:,:,2,cS))), &
+!                      '; Min Psi: ', MINVAL(ABS(Qc(:,:,2,cS)))
+!         500 FORMAT (A,I8.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8)
+!      ELSE
+!         IF (time + dt >= printTime) THEN
+!            printBool = .TRUE.
+!         END IF
+!      END IF
+!
+!      ! Evaluate the exit conditions.
+!      IF (exitThisStep) THEN
+!         EXIT tloop
+!      END IF
+!      !
+!      ! Adjust the time step so the desired end time is reached.
+!      IF (time + dt > tend) THEN
+!         dt = tend - time
+!         exitThisStep = .TRUE.
+!      END IF
+!   END DO tloop
 
    ! Finalize the program.
    CALL Dealloc(Q)
