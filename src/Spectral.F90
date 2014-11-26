@@ -74,7 +74,8 @@ MODULE Spectral_m
    ! Module procedures.
    PUBLIC :: GetGridSize, SpectralSetup, SpectralFinalize
    PUBLIC :: ComputeRHS, ComputePsi
-   PRIVATE :: DuDx, DuDy
+   PUBLIC :: TransformR2C, TransformC2R
+   PUBLIC :: DuDx, DuDy
 
 CONTAINS
 
@@ -246,6 +247,8 @@ CONTAINS
       INTEGER(KIND=IWPF),DIMENSION(1) :: kyMask
       ! Looping indices for physical space.
       INTEGER(KIND=IWPF) :: i, j
+      ! Normalization factor for the FFT.
+      REAL(KIND=RWPC) :: norm
 
       ! Steps to form the nonlinear product term.
       !
@@ -293,6 +296,9 @@ CONTAINS
       !
       CALL FFTW_MPI_EXECUTE_DFT_R2C(r2cPlan, uR, uC)
       CALL FFTW_MPI_EXECUTE_DFT_R2C(r2cPlan, vR, vC)
+      norm = REAL(nxW*nyW, RWPC)
+      uC(:,:) = uC(:,:)/norm
+      vC(:,:) = vC(:,:)/norm
       !
       ! 6. Perform differentation of the nonlinear term in spectral space.
       !
@@ -472,6 +478,52 @@ CONTAINS
          sigOut(kxStart:kxEnd,ky) = (0.0_RWPC, 0.0_RWPC)
       END DO
    END SUBROUTINE DuDy
+
+   !> Subroutine to transform a signal from physical to spectral space.
+   !!
+   !! This is primarily intended for other modules that need to do transforms.
+   !!
+   !> @param[in] nxW Number of grid points in the x direction.
+   !> @param[in] nyW Number of grid points in the y direction.
+   !> @param[in] rISize Size of the i dimension in real data arrays.
+   !> @param[in] cISize Size of the i dimension in complex data arrays.
+   !> @param[in,out] rData Real data to be transformed.
+   !> @param[in,out] cData Complex data array to accept transform.
+   SUBROUTINE TransformR2C(nxW, nyW, rISize, cISize, rData, cData)
+      IMPLICIT NONE
+      ! Calling arguments.
+      INTEGER(KIND=IWPF),INTENT(IN) :: nxW, nyW, rISize, cISize
+      REAL(KIND=RWPC),DIMENSION(rISize,nyW),INTENT(INOUT) :: rData
+      COMPLEX(KIND=CWPC),DIMENSION(cISize,nyW),INTENT(INOUT) :: cData
+      ! Local variables.
+      ! Normalization factor for the forward FFT.
+      REAL(KIND=RWPC) :: norm
+
+      ! Perform the forward transform.
+      CALL FFTW_MPI_EXECUTE_DFT_R2C(r2cPlan, rData, cData)
+      norm = REAL(nxW*nyW, RWPC)
+      cData(:,:) = cData(:,:)/norm
+   END SUBROUTINE TransformR2C
+
+   !> Subroutine to transform a signal from spectral to physical space.
+   !!
+   !! This is primarily intended for other modules that need to do transforms.
+   !!
+   !> @param[in] rISize Size of the i dimension in real data arrays.
+   !> @param[in] cISize Size of the i dimension in complex data arrays.
+   !> @param[in] nyW Number of grid points in the j direction.
+   !> @param[in,out] cData Complex data array to accept transform.
+   !> @param[in,out] rData Real data to be transformed.
+   SUBROUTINE TransformC2R(rISize, cISize, nyW, cData, rData)
+      IMPLICIT NONE
+      ! Calling arguments.
+      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, cISize, nyW
+      COMPLEX(KIND=CWPC),DIMENSION(cISize,nyW),INTENT(INOUT) :: cData
+      REAL(KIND=RWPC),DIMENSION(rISize,nyW),INTENT(INOUT) :: rData
+
+      ! Perform the forward transform.
+      CALL FFTW_MPI_EXECUTE_DFT_C2R(c2rPlan, cData, rData)
+   END SUBROUTINE TransformC2R
 
    !> Finalize the spectral module.
    SUBROUTINE SpectralFinalize()

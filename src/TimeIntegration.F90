@@ -93,9 +93,6 @@ CONTAINS
       CALL Alloc(cISize, nyW, w)
       CALL C_F_POINTER(w, wR, [rISize,nyW])
       CALL C_F_POINTER(w, wC, [cISize,nyW])
-      WRITE(*,*) 'SHAPE(dQ) = ', SHAPE(dQ)
-      WRITE(*,*) 'SHAPE(wR) = ', SHAPE(wR)
-      WRITE(*,*) 'SHAPE(wC) = ', SHAPE(wC)
    END SUBROUTINE TimeIntegrationSetup
 
    !> Subroutine to advance one step in time.

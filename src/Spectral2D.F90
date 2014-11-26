@@ -30,6 +30,9 @@ PROGRAM Spectral2D_p
                         DEALIAS_GRID_SHIFT
    USE TimeIntegration_m,ONLY: TimeIntegrationSetup, IntegrateOneStep, &
                                ComputeTimeStep, RK3_TVD_SHU
+   USE SetIC_m,ONLY: SetICCosineShearX, COSINE_SHEAR_X
+   USE IO_m,ONLY: FileName, WriteGridPlot3d, WriteRestartPlot3d, &
+                  FILE_NAME_LENGTH
 
    IMPLICIT NONE
 
@@ -54,6 +57,8 @@ PROGRAM Spectral2D_p
    REAL(KIND=RWPC),PARAMETER :: writePeriod = 0.001_RWPC
    !> Time period after which to print information to the user.
    REAL(KIND=RWPC),PARAMETER :: printPeriod = 0.001_RWPC
+   !> Desired initial conditions.
+   INTEGER(KIND=IWPF),PARAMETER :: ics = COSINE_SHEAR_X
 
    ! MPI related variables.
    !
@@ -146,6 +151,8 @@ PROGRAM Spectral2D_p
    REAL(KIND=RWPC) :: writeTime = writePeriod
    !> Time after which information will be printed to the user.
    REAL(KIND=RWPC) :: printTime = printPeriod
+   !> Buffer for output file names.
+   CHARACTER(LEN=FILE_NAME_LENGTH) :: fname
 
    ! Initialize MPI.
    CALL MPI_INIT(ierr)
@@ -186,6 +193,27 @@ PROGRAM Spectral2D_p
 
    ! Initialize the FFT module, which creates the FFTW plans.
    CALL SpectralSetup(nxW, nyW, rISize, cISize, nVar, nStg, Qr, Qc)
+
+   ! Set the initial conditions.
+   SELECT CASE (ics)
+      CASE (COSINE_SHEAR_X)
+         CALL SetICCosineShearX(rISize, cISize, nxW, nyW, &
+                                kxLT, kyLT, kxMT, kyMT, &
+                                kxLU, kyLU, kxMU, kyMU, &
+                                nVar, nStg, &
+                                uC, uR, vC, vR, Qc, Qr)
+      CASE DEFAULT
+   END SELECT
+   !
+   ! Write out the grid and the initial conditions.
+   CALL WriteGridPlot3d(nxW, nyW)
+   CALL FileName('REST', 0, 'f', fname)
+   CALL WriteRestartPlot3d(rISize, cISize, nxW, nyW, &
+                           kxLT, kyLT, kxMT, kyMT, &
+                           kxLU, kyLU, kxMU, kyMU, &
+                           nVar, nStg, cS, &
+                           uC, uR, vC, vR, Qc, Qr, fname)
+   STOP
 
    ! Enter the main time stepping loop.
    loopBool = .TRUE.
