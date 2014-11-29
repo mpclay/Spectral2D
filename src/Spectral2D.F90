@@ -42,21 +42,21 @@ PROGRAM Spectral2D_p
    ! User inputs to the simulation.
    !
    !> Number of grid points in the x direction.
-   INTEGER(KIND=IWPF),PARAMETER :: nx = 128_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: nx = 32_IWPF
    !> Number of grid points in the y direction.
-   INTEGER(KIND=IWPF),PARAMETER :: ny = 128_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: ny = 32_IWPF
    !> Dealiasing technique.
    INTEGER(KIND=IWPF),PARAMETER :: dealias = NO_DEALIASING
    !> Physical viscosity.
-   REAL(KIND=RWPC),PARAMETER :: nu = 1.0e-3_RWPC
+   REAL(KIND=RWPC),PARAMETER :: nu = 1.0e-2_RWPC
    !> Time integration scheme.
    INTEGER(KIND=IWPF),PARAMETER :: timeScheme = RK3_TVD_SHU
    !> End time for the simulation.
-   REAL(KIND=RWPC),PARAMETER :: tEnd = 0.01_RWPC
+   REAL(KIND=RWPC),PARAMETER :: tEnd = 100.0_RWPC
    !> Time period after which to write a data file.
-   REAL(KIND=RWPC),PARAMETER :: writePeriod = 0.001_RWPC
+   REAL(KIND=RWPC),PARAMETER :: writePeriod = 10.0_RWPC
    !> Time period after which to print information to the user.
-   REAL(KIND=RWPC),PARAMETER :: printPeriod = 0.001_RWPC
+   REAL(KIND=RWPC),PARAMETER :: printPeriod = 0.1_RWPC
    !> Desired initial conditions.
    INTEGER(KIND=IWPF),PARAMETER :: ics = COSINE_SHEAR_X
 
@@ -146,7 +146,7 @@ PROGRAM Spectral2D_p
    !> Current simulation time.
    REAL(KIND=RWPF) :: time = 0.0_RWPC
    !> Simulation time step.
-   REAL(KIND=RWPC) :: dt = 1.0e-6_RWPC
+   REAL(KIND=RWPC) :: dt = 1.0e-5_RWPC
    !> Current simluation step.
    INTEGER(KIND=IWPF) :: nadv = 0_IWPF
 
@@ -223,69 +223,72 @@ PROGRAM Spectral2D_p
    !
    ! Write out a restart file.
    CALL WriteRestart(nxG, nyG, nxG, nyG, 1_IWPF, 1_IWPF, 1_IWPF, 1_IWPF, &
-                     rISize, cISize, kxG, kyG, rank, 0_IWPF, HDF5_OUTPUT, &
+                     rISize, cISize, kxG, kyG, rank, nadv, time, HDF5_OUTPUT, &
                      uC, uR, vC, vR, Qc(:,:,1,1), Qr(:,:,1,1), &
                      Qc(:,:,2,1), Qr(:,:,2,1))
 
-!   ! Enter the main time stepping loop.
-!   loopBool = .TRUE.
-!   exitThisStep = .FALSE.
-!   tloop: DO WHILE (loopBool)
-!      ! Increment the Q array by 1 time step.
-!      !
-!      ! NOTE: The only arrays that are correct after this step are Qr and Qc.
-!      CALL IntegrateOneStep(rISize, cISize, nxW, nyW, &
-!                            kxLT, kyLT, kxMT, kyMT, &
-!                            kxLU, kyLU, kxMU, kyMU, &
-!                            nu, dt, &
-!                            nVar, nStg, cS, nS, &
-!                            uC, uR, vC, vR, Qc, Qr)
-!
-!      ! Increment the time and step counters.
-!      time = time + dt
-!      nadv = nadv + 1_IWPF
-!
-!      ! Compute the next time step.
-!      CALL ComputeTimeStep()
-!
-!      ! Check whether or not we will write out data to file.
-!      IF (writeBool) THEN
-!         writeTime = writeTime + writePeriod
-!         writeBool = .FALSE.
-!      ELSE
-!         IF (time + dt >= writeTime) THEN
-!            writeBool = .TRUE.
-!         END IF
-!      END IF
-!
-!      ! Check whether or not we will print information to the user.
-!      IF (printBool .OR. exitThisStep) THEN
-!         printTime = printTime + printPeriod
-!         printBool = .FALSE.
-!         WRITE(*,500) 'Simulation step number: ', nadv, &
-!                      '; Simulation time: ', time, &
-!                      '; Max W: ', MAXVAL(ABS(Qc(:,:,1,cS))), &
-!                      '; Min W: ', MINVAL(ABS(Qc(:,:,1,cS))), &
-!                      '; Max Psi: ', MAXVAL(ABS(Qc(:,:,2,cS))), &
-!                      '; Min Psi: ', MINVAL(ABS(Qc(:,:,2,cS)))
-!         500 FORMAT (A,I8.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8)
-!      ELSE
-!         IF (time + dt >= printTime) THEN
-!            printBool = .TRUE.
-!         END IF
-!      END IF
-!
-!      ! Evaluate the exit conditions.
-!      IF (exitThisStep) THEN
-!         EXIT tloop
-!      END IF
-!      !
-!      ! Adjust the time step so the desired end time is reached.
-!      IF (time + dt > tend) THEN
-!         dt = tend - time
-!         exitThisStep = .TRUE.
-!      END IF
-!   END DO tloop
+   ! Enter the main time stepping loop.
+   loopBool = .TRUE.
+   exitThisStep = .FALSE.
+   writeBool = .FALSE.
+   printBool = .FALSE.
+   tloop: DO WHILE (loopBool)
+      ! Increment the Q array by 1 time step.
+      !
+      ! NOTE: The only arrays that are correct after this step are Qr and Qc.
+      CALL IntegrateOneStep(nxG, nyG, rISize, cISize, kxG, kyG, &
+                            nu, dt, nVar, nStg, cS, nS, &
+                            uC, uR, vC, vR, Qc, Qr)
+
+      ! Increment the time and step counters.
+      time = time + dt
+      nadv = nadv + 1_IWPF
+
+      ! Compute the next time step.
+      CALL ComputeTimeStep()
+
+      ! Check whether or not we will write out data to file.
+      IF (writeBool) THEN
+         writeTime = writeTime + writePeriod
+         writeBool = .FALSE.
+         CALL WriteRestart(nxG, nyG, nxG, nyG, 1_IWPF, 1_IWPF, 1_IWPF, 1_IWPF, &
+                           rISize, cISize, kxG, kyG, rank, nadv, time, &
+                           HDF5_OUTPUT, uC, uR, vC, vR, Qc(:,:,1,1), &
+                           Qr(:,:,1,1), Qc(:,:,2,1), Qr(:,:,2,1))
+      ELSE
+         IF (time + dt >= writeTime) THEN
+            writeBool = .TRUE.
+         END IF
+      END IF
+
+      ! Check whether or not we will print information to the user.
+      IF (printBool .OR. exitThisStep) THEN
+         printTime = printTime + printPeriod
+         printBool = .FALSE.
+         WRITE(OUTPUT_UNIT,500) 'Simulation step number: ', nadv, &
+                                '; Simulation time: ', time, &
+                                '; Max W: ', MAXVAL(ABS(Qc(:,:,1,cS))), &
+                                '; Min W: ', MINVAL(ABS(Qc(:,:,1,cS))), &
+                                '; Max Psi: ', MAXVAL(ABS(Qc(:,:,2,cS))), &
+                                '; Min Psi: ', MINVAL(ABS(Qc(:,:,2,cS)))
+         500 FORMAT (A,I8.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8)
+      ELSE
+         IF (time + dt >= printTime) THEN
+            printBool = .TRUE.
+         END IF
+      END IF
+
+      ! Evaluate the exit conditions.
+      IF (exitThisStep) THEN
+         EXIT tloop
+      END IF
+      !
+      ! Adjust the time step so the desired end time is reached.
+      IF (time + dt > tend) THEN
+         dt = tend - time
+         exitThisStep = .TRUE.
+      END IF
+   END DO tloop
 
    ! Finalize the program.
    CALL Dealloc(Q)

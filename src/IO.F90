@@ -41,6 +41,9 @@ MODULE IO_m
    !> File name length for output files.
    INTEGER(KIND=IWPF),PARAMETER,PUBLIC :: FILE_NAME_LENGTH = 256_IWPF
 
+   !> Restart file counter. Incremented each time one is written.
+   INTEGER(KIND=IWPF),PRIVATE :: restNum = 0_IWPF
+
    !> Interface for the file name function.
    INTERFACE FileName
       MODULE PROCEDURE FileNameWithoutNum
@@ -50,6 +53,7 @@ MODULE IO_m
    !> Interface for writing attributes to HDF5 files.
    INTERFACE WriteAttribute
       MODULE PROCEDURE WriteAttributeInteger
+      MODULE PROCEDURE WriteAttributeDouble
    END INTERFACE WriteAttribute
 
    ! Module procedures.
@@ -79,7 +83,8 @@ CONTAINS
    !> @param[in] kxG Wavenumbers in the x direction.
    !> @param[in] kyG Wavenumbers in the y direction.
    !> @param[in] rank MPI process ID for this process.
-   !> @param[in] outNum Number of the restart file.
+   !> @param[in] nadv Current simulation step.
+   !> @param[in] time Current simulation time.
    !> @param[in] outType Desired output file type.
    !> @param[in] uC Complex cast of u velocity data.
    !> @param[in] uR Real cast of u velocity data.
@@ -89,17 +94,19 @@ CONTAINS
    !> @param[in] wR Real cast of vorticity.
    !> @param[in] psiC Complex cast of the streamfunction.
    !> @param[in] psiR Real cast of the streamfunction.
-   SUBROUTINE WriteRestart(nxG, nyG, nxP, nyP, i1, i2, j1, j2, &
-                           rISize, cISize, kxG, kyG, rank, outNum, outType, &
+   SUBROUTINE WriteRestart(nxG, nyG, nxP, nyP, i1, i2, j1, j2, rISize, cISize, &
+                           kxG, kyG, rank, nadv, time, outType, &
                            uC, uR, vC, vR, wC, wR, psiC, psiR)
       ! Required modules.
+      USE ISO_FORTRAN_ENV,ONLY: OUTPUT_UNIT
       USE MPI,ONLY: MPI_COMM_WORLD
       USE Spectral_m,ONLY: ComputeVelocity, TransformC2R, TransformR2C
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: nxG, nyG, nxP, nyP, i1, i2, j1, j2
-      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, cISize, rank, outNum, outType
+      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, cISize, rank, nadv, outType
       INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxG
       INTEGER(KIND=IWPF),DIMENSION(nyP),INTENT(IN) :: kyG
+      REAL(KIND=RWPC),INTENT(IN) :: time
       COMPLEX(KIND=CWPC),DIMENSION(cISize,nyP),INTENT(INOUT) :: uC, vC, wC, psiC
       REAL(KIND=RWPC),DIMENSION(rISize,nyP),INTENT(INOUT) :: uR, vR, wR, psiR
       ! Local variables.
@@ -113,14 +120,20 @@ CONTAINS
       CALL TransformC2R(rISize, cISize, nyG, psiC, psiR)
       !
       ! Write out the restart file.
+      WRITE(OUTPUT_UNIT,100) 'Writing REST_', restNum, '.h5 at t = ', time, &
+                             ' and nadv = ', nadv
+      100 FORMAT (A,I6.6,A,ES15.8,A,I8.8)
       SELECT CASE (outType)
          CASE (HDF5_OUTPUT)
-            CALL FileName('REST', outNum, 'h5', fname)
+            CALL FileName('REST', restNum, 'h5', fname)
             CALL WriteRestartHDF5(MPI_COMM_WORLD, rank, fname, rISize, &
-                                  nxG, nyG, nxP, nyP, i1, j1, &
+                                  nxG, nyG, nxP, nyP, i1, j1, nadv, time, &
                                   wR, psiR, uR, vR)
          CASE DEFAULT
       END SELECT
+      !
+      ! Increment the restart file counter.
+      restNum = restNum + 1_IWPF
       !
       ! Transform back to spectral space.
       CALL TransformR2C(nxG, nyG, rISize, cISize, wR, wC)
@@ -281,12 +294,14 @@ CONTAINS
    !> @param[in] nyP Number of cells in the y direction for this process.
    !> @param[in] i1 Starting i index for this process.
    !> @param[in] j1 Starting j index for this process.
+   !> @param[in] nadv Current simulation step.
+   !> @param[in] time Current simulation time.
    !> @param[in] w Vorticity in the domain.
    !> @param[in] psi Streamfunction in the domain.
    !> @param[in] u Velocity in the x direction.
    !> @param[in] v Velocity in the y direction.
    SUBROUTINE WriteRestartHDF5(comm, rank, fName, rISize, nxW, nyW, &
-                               nxP, nyP, i1, j1, w, psi, u, v)
+                               nxP, nyP, i1, j1, nadv, time, w, psi, u, v)
       ! Required modules.
       USE HDF5
       USE MPI,ONLY: MPI_INFO_NULL
@@ -294,7 +309,8 @@ CONTAINS
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: comm, rank
       CHARACTER(LEN=*),INTENT(IN) :: fName
-      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, nxW, nyW, nxP, nyP, i1, j1
+      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, nxW, nyW, nxP, nyP, i1, j1, nadv
+      REAL(KIND=RWPC),INTENT(IN) :: time
       REAL(KIND=RWPC),DIMENSION(rISize,nyW),INTENT(IN) :: w, psi, u, v
       ! Local variables.
       ! HDF5 ID for the restart file.
@@ -366,6 +382,8 @@ CONTAINS
       ! Write header attributes.
       CALL WriteAttribute(dataset_id, H5T_NATIVE_INTEGER, 'nx', nxW)
       CALL WriteAttribute(dataset_id, H5T_NATIVE_INTEGER, 'ny', nyW)
+      CALL WriteAttribute(dataset_id, H5T_NATIVE_INTEGER, 'nadv', nadv)
+      CALL WriteAttribute(dataset_id, H5T_NATIVE_DOUBLE, 'time', time)
 
       ! Close the 'Header' dataset
       CALL H5DCLOSE_F(dataset_id, ierr)
@@ -510,6 +528,46 @@ CONTAINS
       ! Close the dataset.
       CALL H5ACLOSE_F(attr_id, ierr)
    END SUBROUTINE WriteAttributeInteger
+
+   !> Procedure to write a double attribute to an HDF5 dataset.
+   !!
+   !> @param[in] dset_id HDF5 identifier for the data set.
+   !> @param[in] type_id What type of HDF5 variable this is.
+   !> @param[in] att_name Name for the attribute.
+   !> @param[in] var The data to be written.
+   SUBROUTINE WriteAttributeDouble(dset_id, type_id, att_name, var)
+      ! Required modules.
+      USE HDF5
+      IMPLICIT NONE
+      ! Calling arguments.
+      INTEGER(KIND=HID_T),INTENT(IN) :: dset_id, type_id
+      CHARACTER(LEN=*),INTENT(IN) :: att_name
+      REAL(KIND=RWPC),INTENT(IN) :: var
+      ! Local variables.
+      ! Dataspace identifier for the attribute.
+      INTEGER(KIND=HID_T) :: aspace_id
+      ! Dataset identifier for the attribute.
+      INTEGER(KIND=HID_T) :: attr_id
+      ! Dimensions of the data to be written.
+      INTEGER(HSIZE_T),DIMENSION(1),PARAMETER :: dims = [1]
+      ! Error handling.
+      INTEGER(KIND=IWPF) :: ierr
+
+      ! Create the dataspace for the attribute.
+      CALL H5SCREATE_F(H5S_SCALAR_F, aspace_id, ierr)
+      !
+      ! Create a dataset for the attribute.
+      CALL H5ACREATE_F(dset_id, att_name, type_id, aspace_id, attr_id, ierr)
+      !
+      ! Write to the dataset.
+      CALL H5AWRITE_F(attr_id, type_id, var, dims, ierr)
+      !
+      ! Close the dataspace for the dataset.
+      CALL H5SCLOSE_F(aspace_id, ierr)
+      !
+      ! Close the dataset.
+      CALL H5ACLOSE_F(attr_id, ierr)
+   END SUBROUTINE WriteAttributeDouble
 
    !> Routine to form a file name with a root name and file suffix.
    !!
