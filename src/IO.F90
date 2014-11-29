@@ -125,8 +125,7 @@ CONTAINS
       100 FORMAT (A,I6.6,A,ES15.8,A,I8.8)
       SELECT CASE (outType)
          CASE (HDF5_OUTPUT)
-            CALL FileName('REST', restNum, 'h5', fname)
-            CALL WriteRestartHDF5(MPI_COMM_WORLD, rank, fname, rISize, &
+            CALL WriteRestartHDF5(MPI_COMM_WORLD, rank, restNum, rISize, &
                                   nxG, nyG, nxP, nyP, i1, j1, nadv, time, &
                                   wR, psiR, uR, vR)
          CASE DEFAULT
@@ -286,7 +285,7 @@ CONTAINS
    !!
    !> @param[in] comm MPI communicator from the calling code.
    !> @param[in] rank MPI rank in the main process list.
-   !> @param[in] fName Name of the restart file.
+   !> @param[in] num Number of the restart file.
    !> @param[in] rISize Size of real data arrays in the i direction.
    !> @param[in] nxW Number of cells in the x direction for the simulation.
    !> @param[in] nyW Number of cells in the y direction for the simulation.
@@ -300,19 +299,20 @@ CONTAINS
    !> @param[in] psi Streamfunction in the domain.
    !> @param[in] u Velocity in the x direction.
    !> @param[in] v Velocity in the y direction.
-   SUBROUTINE WriteRestartHDF5(comm, rank, fName, rISize, nxW, nyW, &
+   SUBROUTINE WriteRestartHDF5(comm, rank, num, rISize, nxW, nyW, &
                                nxP, nyP, i1, j1, nadv, time, w, psi, u, v)
       ! Required modules.
       USE HDF5
       USE MPI,ONLY: MPI_INFO_NULL
       IMPLICIT NONE
       ! Calling arguments.
-      INTEGER(KIND=IWPF),INTENT(IN) :: comm, rank
-      CHARACTER(LEN=*),INTENT(IN) :: fName
+      INTEGER(KIND=IWPF),INTENT(IN) :: comm, rank, num
       INTEGER(KIND=IWPF),INTENT(IN) :: rISize, nxW, nyW, nxP, nyP, i1, j1, nadv
       REAL(KIND=RWPC),INTENT(IN) :: time
       REAL(KIND=RWPC),DIMENSION(rISize,nyW),INTENT(IN) :: w, psi, u, v
       ! Local variables.
+      ! Name for the restart file.
+      CHARACTER(LEN=FILE_NAME_LENGTH) :: fname
       ! HDF5 ID for the restart file.
       INTEGER(KIND=HID_T) :: file_id
       ! HDF5 ID for the header dataset.
@@ -366,6 +366,7 @@ CONTAINS
       CALL H5PSET_FAPL_MPIO_F(plist_id, comm, info, ierr)
 
       ! Open the file for writing.
+      CALL FileName('REST', num, 'h5', fname)
       CALL H5FCREATE_F(fName, H5F_ACC_TRUNC_F, file_id, ierr, &
                        access_prp=plist_id)
 
@@ -414,7 +415,7 @@ CONTAINS
       CALL H5CLOSE_F(ierr)
 
       ! Write out the xml file needed to view the HDF5 data in Xdmf format.
-      !CALL WriteRestartXML(0, nxT, nyT, nzT, fName, xlenT, ylenT, zlenT)
+      CALL WriteXMF(nxW, nyW, num)
    END SUBROUTINE WriteRestartHDF5
 
    !> Routine to write a chunk of data with parallel HDF5 to a specified file
@@ -568,6 +569,80 @@ CONTAINS
       ! Close the dataset.
       CALL H5ACLOSE_F(attr_id, ierr)
    END SUBROUTINE WriteAttributeDouble
+
+   !> Write the xmf file for a restart file.
+   !!
+   !> @param[in] nxG Number of grid points in the x direction.
+   !> @param[in] nyG Number of grid points in the y direction.
+   !> @param[in] num Number for the restart file.
+   SUBROUTINE WriteXMF(nxG, nyG, num)
+      IMPLICIT NONE
+      ! Calling arguments.
+      INTEGER(KIND=IWPF),INTENT(IN) :: nxG, nyG, num
+      ! Local variables.
+      ! Name for the xmf file.
+      CHARACTER(LEN=FILE_NAME_LENGTH) :: fname
+      ! Name for the restart file.
+      CHARACTER(LEN=FILE_NAME_LENGTH) :: restName
+
+      ! Name of the restart HDF5 data file.
+      CALL FileName('REST', num, 'h5', restName)
+
+      ! Open the xmf file.
+      CALL FileName('REST', num, 'xmf', fname)
+      OPEN(UNIT=10,FILE=fname,STATUS='REPLACE',FORM='FORMATTED')
+
+      ! Fill in the xmf information.
+      WRITE(10,20) '<?xml version="1.0" ?>'
+      WRITE(10,20) '<!DOCTYPE Xdmf SYSTEM "Xdmf.dtd" []>'
+      WRITE(10,20) '<Xdmf Version="2.1">'
+      WRITE(10,30) '<Domain Name="Domain 1">'
+      WRITE(10,40) '<Grid GridType="Uniform" Name="Block 1">'
+      WRITE(10,50) '<Topology TopologyType="2DSMesh" NumberOfElements="', nxG, nyG, '"/>'
+      WRITE(10,60) '<Geometry GeometryType="X_Y">'
+      WRITE(10,70) '<DataItem Dimensions="', nxG, nyG, '" NumberType="Float" Precision="8" Format="HDF">'
+      WRITE(10,80) 'GRID.h5:/Domain_00001/x'
+      WRITE(10,90) '</DataItem>'
+      WRITE(10,70) '<DataItem Dimensions="', nxG, nyG, '" NumberType="Float" Precision="8" Format="HDF">'
+      WRITE(10,80) 'GRID.h5:/Domain_00001/y'
+      WRITE(10,90) '</DataItem>'
+      WRITE(10,60) '</Geometry>'
+      WRITE(10,60) '<Attribute AttributeType="Scalar" Center="Node" Name="Omega [1/s]">'
+      WRITE(10,70) '<DataItem Dimensions="', nxG, nyG, '" NumberType="Float" Precision="8" Format="HDF">'
+      WRITE(10,95) TRIM(restName), ':/FlowData/Omega'
+      WRITE(10,90) '</DataItem>'
+      WRITE(10,60) '</Attribute>'
+      WRITE(10,60) '<Attribute AttributeType="Scalar" Center="Node" Name="Psi [m^2/s]">'
+      WRITE(10,70) '<DataItem Dimensions="', nxG, nyG, '" NumberType="Float" Precision="8" Format="HDF">'
+      WRITE(10,95) TRIM(restName), ':/FlowData/Psi'
+      WRITE(10,90) '</DataItem>'
+      WRITE(10,60) '</Attribute>'
+      WRITE(10,60) '<Attribute AttributeType="Scalar" Center="Node" Name="u [m/s]">'
+      WRITE(10,70) '<DataItem Dimensions="', nxG, nyG, '" NumberType="Float" Precision="8" Format="HDF">'
+      WRITE(10,95) TRIM(restName), ':/FlowData/u'
+      WRITE(10,90) '</DataItem>'
+      WRITE(10,60) '</Attribute>'
+      WRITE(10,60) '<Attribute AttributeType="Scalar" Center="Node" Name="v [m/s]">'
+      WRITE(10,70) '<DataItem Dimensions="', nxG, nyG, '" NumberType="Float" Precision="8" Format="HDF">'
+      WRITE(10,95) TRIM(restName), ':/FlowData/v'
+      WRITE(10,90) '</DataItem>'
+      WRITE(10,60) '</Attribute>'
+      WRITE(10,40) '</Grid>'
+      WRITE(10,30) '</Domain>'
+      WRITE(10,20) '</Xdmf>'
+      20 FORMAT (A)
+      30 FORMAT (T4,A)
+      40 FORMAT (T7,A)
+      50 FORMAT (T10,A,I4.4,1X,I4.4,A)
+      60 FORMAT (T10,A)
+      70 FORMAT (T13,A,I4.4,1X,I4.4,A)
+      80 FORMAT (T16,A)
+      90 FORMAT (T13,A)
+      95 FORMAT (T16,A,A)
+
+      ! Close the xmf file.
+      CLOSE(UNIT=10)
+   END SUBROUTINE WriteXMF
 
    !> Routine to form a file name with a root name and file suffix.
    !!
