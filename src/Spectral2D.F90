@@ -30,7 +30,7 @@ PROGRAM Spectral2D_p
                         NO_DEALIASING, DEALIAS_3_2_RULE, DEALIAS_2_3_RULE
    USE TimeIntegration_m,ONLY: TimeIntegrationSetup, IntegrateOneStep, &
                                ComputeTimeStep, RK3_TVD_SHU
-   USE SetIC_m,ONLY: SetICCosineShearX, COSINE_SHEAR_X
+   USE SetIC_m,ONLY: TAYLOR_GREEN_VORTEX, SetTaylorGreen
    USE IO_m,ONLY: FileName, WriteGridHDF5, WriteRestart, FILE_NAME_LENGTH, &
                   HDF5_OUTPUT
 
@@ -39,26 +39,64 @@ PROGRAM Spectral2D_p
    ! FFTW MPI procedure declarations.
    INCLUDE 'fftw3-mpi.f03'
 
+   ! Methods by which to determine the time step.
+   !
+   !> Constant time stepping.
+   INTEGER(KIND=IWPF),PARAMETER :: CONSTANT_TIME_STEP = 1_IWPF
+   !> Time step determined by the CFL criterion.
+   INTEGER(KIND=IWPF),PARAMETER :: DYNAMIC_TIME_STEP = 2_IWPF
+   !
+   ! Methods to determine when the simulation ends.
+   !
+   !> Fixed number of time step.
+   INTEGER(KIND=IWPF),PARAMETER :: FIXED_STEP_COUNT = 1_IWPF
+   !> Fixed end time for the simulation.
+   INTEGER(KIND=IWPF),PARAMETER :: DESIRED_END_TIME = 2_IWPF
+
    ! User inputs to the simulation.
    !
    !> Number of grid points in the x direction.
-   INTEGER(KIND=IWPF),PARAMETER :: nx = 32_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: nx = 16_IWPF
    !> Number of grid points in the y direction.
-   INTEGER(KIND=IWPF),PARAMETER :: ny = 32_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: ny = 16_IWPF
+   !
+   ! Physical parameters and spatial scheme control.
+   !
+   !> Physical viscosity.
+   REAL(KIND=RWPC),PARAMETER :: nu = 1.0_RWPC
    !> Dealiasing technique.
    INTEGER(KIND=IWPF),PARAMETER :: dealias = NO_DEALIASING
-   !> Physical viscosity.
-   REAL(KIND=RWPC),PARAMETER :: nu = 1.0e-2_RWPC
+   !
+   ! Time integration and simulation ending method.
+   !
    !> Time integration scheme.
    INTEGER(KIND=IWPF),PARAMETER :: timeScheme = RK3_TVD_SHU
+   !> Desired simulation ending criterion.
+   INTEGER(KIND=IWPF),PARAMETER :: endMethod = FIXED_STEP_COUNT
+   !
+   ! Parameters required for constant time stepping.
+   !
+   !> Number of steps for the simulation.
+   INTEGER(KIND=IWPF),PARAMETER :: stepEnd = 10000_IWPF
+   !> Simulation time step.
+   REAL(KIND=RWPC) :: dt = 1.0e-4_RWPC
+   !
+   ! Parameters required for dynamic time stepping.
+   !
    !> End time for the simulation.
-   REAL(KIND=RWPC),PARAMETER :: tEnd = 100.0_RWPC
-   !> Time period after which to write a data file.
-   REAL(KIND=RWPC),PARAMETER :: writePeriod = 10.0_RWPC
-   !> Time period after which to print information to the user.
-   REAL(KIND=RWPC),PARAMETER :: printPeriod = 0.1_RWPC
+   REAL(KIND=RWPC) :: tEnd = 1.0_RWPC
+   !
+   ! Parameters to determine when data will be written.
+   !
+   !> Number of steps after which to write a data file.
+   INTEGER(KIND=IWPF),PARAMETER :: writePeriod = 10000_IWPF
+   !> Number of steps after which to print info to the user.
+   INTEGER(KIND=IWPF),PARAMETER :: printPeriod = 1000_IWPF
+   !
+   ! Parameters to control initial conditions.
+   !
    !> Desired initial conditions.
-   INTEGER(KIND=IWPF),PARAMETER :: ics = COSINE_SHEAR_X
+   INTEGER(KIND=IWPF),PARAMETER :: ics = TAYLOR_GREEN_VORTEX
 
    ! MPI related variables.
    !
@@ -145,8 +183,6 @@ PROGRAM Spectral2D_p
    !
    !> Current simulation time.
    REAL(KIND=RWPF) :: time = 0.0_RWPC
-   !> Simulation time step.
-   REAL(KIND=RWPC) :: dt = 1.0e-5_RWPC
    !> Current simluation step.
    INTEGER(KIND=IWPF) :: nadv = 0_IWPF
 
@@ -160,10 +196,10 @@ PROGRAM Spectral2D_p
    LOGICAL :: loopBool, exitThisStep
    !> Logic to determine when to write data and print info to the user.
    LOGICAL :: printBool, writeBool
-   !> Time after which a data file will be written.
-   REAL(KIND=RWPC) :: writeTime = writePeriod
-   !> Time after which information will be printed to the user.
-   REAL(KIND=RWPC) :: printTime = printPeriod
+   !> Number of steps after which a data file will be written.
+   INTEGER(KIND=IWPF) :: writeStep = writePeriod
+   !> Number of steps after which information will be printed to the user.
+   INTEGER(KIND=IWPF) :: printStep = printPeriod
    !> Buffer for output file names.
    CHARACTER(LEN=FILE_NAME_LENGTH) :: fname
 
@@ -214,17 +250,16 @@ PROGRAM Spectral2D_p
 
    ! Set the initial conditions.
    SELECT CASE (ics)
-      CASE (COSINE_SHEAR_X)
-         CALL SetICCosineShearX(nxG, nyG, rISize, cISize, kxG, kyG, &
-                                uC, uR, vC, vR, Qc(:,:,1,1), Qr(:,:,1,1), &
-                                Qc(:,:,2,1), Qr(:,:,2,1))
+      CASE (TAYLOR_GREEN_VORTEX)
+         CALL SetTaylorGreen(nxG, nyG, rISize, cISize, &
+                             Qc(:,:,1,1), Qr(:,:,1,1), Qc(:,:,2,1), Qr(:,:,2,1))
       CASE DEFAULT
    END SELECT
    !
    ! Write out a restart file.
    CALL WriteRestart(nxG, nyG, nxG, nyG, 1_IWPF, 1_IWPF, 1_IWPF, 1_IWPF, &
-                     rISize, cISize, kxG, kyG, rank, nadv, time, HDF5_OUTPUT, &
-                     uC, uR, vC, vR, Qc(:,:,1,1), Qr(:,:,1,1), &
+                     rISize, cISize, kxG, kyG, rank, nadv, time, nu, &
+                     HDF5_OUTPUT, uC, uR, vC, vR, Qc(:,:,1,1), Qr(:,:,1,1), &
                      Qc(:,:,2,1), Qr(:,:,2,1))
 
    ! Enter the main time stepping loop.
@@ -247,23 +282,9 @@ PROGRAM Spectral2D_p
       ! Compute the next time step.
       CALL ComputeTimeStep()
 
-      ! Check whether or not we will write out data to file.
-      IF (writeBool) THEN
-         writeTime = writeTime + writePeriod
-         writeBool = .FALSE.
-         CALL WriteRestart(nxG, nyG, nxG, nyG, 1_IWPF, 1_IWPF, 1_IWPF, 1_IWPF, &
-                           rISize, cISize, kxG, kyG, rank, nadv, time, &
-                           HDF5_OUTPUT, uC, uR, vC, vR, Qc(:,:,1,1), &
-                           Qr(:,:,1,1), Qc(:,:,2,1), Qr(:,:,2,1))
-      ELSE
-         IF (time + dt >= writeTime) THEN
-            writeBool = .TRUE.
-         END IF
-      END IF
-
       ! Check whether or not we will print information to the user.
       IF (printBool .OR. exitThisStep) THEN
-         printTime = printTime + printPeriod
+         printStep = printStep + printPeriod
          printBool = .FALSE.
          WRITE(OUTPUT_UNIT,500) 'Simulation step number: ', nadv, &
                                 '; Simulation time: ', time, &
@@ -273,8 +294,22 @@ PROGRAM Spectral2D_p
                                 '; Min Psi: ', MINVAL(ABS(Qc(:,:,2,cS)))
          500 FORMAT (A,I8.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8)
       ELSE
-         IF (time + dt >= printTime) THEN
+         IF (nadv + 1_IWPF == printStep) THEN
             printBool = .TRUE.
+         END IF
+      END IF
+
+      ! Check whether or not we will write out data to file.
+      IF (writeBool .OR. exitThisStep) THEN
+         writeStep = writeStep + writePeriod
+         writeBool = .FALSE.
+         CALL WriteRestart(nxG, nyG, nxG, nyG, 1_IWPF, 1_IWPF, 1_IWPF, 1_IWPF, &
+                           rISize, cISize, kxG, kyG, rank, nadv, time, nu, &
+                           HDF5_OUTPUT, uC, uR, vC, vR, Qc(:,:,1,cS), &
+                           Qr(:,:,1,cS), Qc(:,:,2,cS), Qr(:,:,2,cS))
+      ELSE
+         IF (nadv + 1_IWPF == writeStep) THEN
+            writeBool = .TRUE.
          END IF
       END IF
 
@@ -283,11 +318,18 @@ PROGRAM Spectral2D_p
          EXIT tloop
       END IF
       !
-      ! Adjust the time step so the desired end time is reached.
-      IF (time + dt > tend) THEN
-         dt = tend - time
-         exitThisStep = .TRUE.
-      END IF
+      ! Check when we should exit.
+      SELECT CASE (endMethod)
+         CASE (FIXED_STEP_COUNT)
+            IF (nadv + 1_IWPF == stepEnd) THEN
+               exitThisStep = .TRUE.
+            END IF
+         CASE (DESIRED_END_TIME)
+            IF (time + dt >= tEnd) THEN
+               exitThisStep = .TRUE.
+               dt = tend - time
+            END IF
+      END SELECT
    END DO tloop
 
    ! Finalize the program.

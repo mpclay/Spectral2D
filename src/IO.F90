@@ -85,6 +85,7 @@ CONTAINS
    !> @param[in] rank MPI process ID for this process.
    !> @param[in] nadv Current simulation step.
    !> @param[in] time Current simulation time.
+   !> @param[in] nu Physical viscosity.
    !> @param[in] outType Desired output file type.
    !> @param[in] uC Complex cast of u velocity data.
    !> @param[in] uR Real cast of u velocity data.
@@ -95,7 +96,7 @@ CONTAINS
    !> @param[in] psiC Complex cast of the streamfunction.
    !> @param[in] psiR Real cast of the streamfunction.
    SUBROUTINE WriteRestart(nxG, nyG, nxP, nyP, i1, i2, j1, j2, rISize, cISize, &
-                           kxG, kyG, rank, nadv, time, outType, &
+                           kxG, kyG, rank, nadv, time, nu, outType, &
                            uC, uR, vC, vR, wC, wR, psiC, psiR)
       ! Required modules.
       USE ISO_FORTRAN_ENV,ONLY: OUTPUT_UNIT
@@ -106,7 +107,7 @@ CONTAINS
       INTEGER(KIND=IWPF),INTENT(IN) :: rISize, cISize, rank, nadv, outType
       INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxG
       INTEGER(KIND=IWPF),DIMENSION(nyP),INTENT(IN) :: kyG
-      REAL(KIND=RWPC),INTENT(IN) :: time
+      REAL(KIND=RWPC),INTENT(IN) :: time, nu
       COMPLEX(KIND=CWPC),DIMENSION(cISize,nyP),INTENT(INOUT) :: uC, vC, wC, psiC
       REAL(KIND=RWPC),DIMENSION(rISize,nyP),INTENT(INOUT) :: uR, vR, wR, psiR
       ! Local variables.
@@ -126,7 +127,7 @@ CONTAINS
       SELECT CASE (outType)
          CASE (HDF5_OUTPUT)
             CALL WriteRestartHDF5(MPI_COMM_WORLD, rank, restNum, rISize, &
-                                  nxG, nyG, nxP, nyP, i1, j1, nadv, time, &
+                                  nxG, nyG, nxP, nyP, i1, j1, nadv, time, nu, &
                                   wR, psiR, uR, vR)
          CASE DEFAULT
       END SELECT
@@ -295,12 +296,13 @@ CONTAINS
    !> @param[in] j1 Starting j index for this process.
    !> @param[in] nadv Current simulation step.
    !> @param[in] time Current simulation time.
+   !> @param[in] nu Physical viscosity.
    !> @param[in] w Vorticity in the domain.
    !> @param[in] psi Streamfunction in the domain.
    !> @param[in] u Velocity in the x direction.
    !> @param[in] v Velocity in the y direction.
    SUBROUTINE WriteRestartHDF5(comm, rank, num, rISize, nxW, nyW, &
-                               nxP, nyP, i1, j1, nadv, time, w, psi, u, v)
+                               nxP, nyP, i1, j1, nadv, time, nu, w, psi, u, v)
       ! Required modules.
       USE HDF5
       USE MPI,ONLY: MPI_INFO_NULL
@@ -308,7 +310,7 @@ CONTAINS
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: comm, rank, num
       INTEGER(KIND=IWPF),INTENT(IN) :: rISize, nxW, nyW, nxP, nyP, i1, j1, nadv
-      REAL(KIND=RWPC),INTENT(IN) :: time
+      REAL(KIND=RWPC),INTENT(IN) :: time, nu
       REAL(KIND=RWPC),DIMENSION(rISize,nyW),INTENT(IN) :: w, psi, u, v
       ! Local variables.
       ! Name for the restart file.
@@ -385,6 +387,7 @@ CONTAINS
       CALL WriteAttribute(dataset_id, H5T_NATIVE_INTEGER, 'ny', nyW)
       CALL WriteAttribute(dataset_id, H5T_NATIVE_INTEGER, 'nadv', nadv)
       CALL WriteAttribute(dataset_id, H5T_NATIVE_DOUBLE, 'time', time)
+      CALL WriteAttribute(dataset_id, H5T_NATIVE_DOUBLE, 'nu', nu)
 
       ! Close the 'Header' dataset
       CALL H5DCLOSE_F(dataset_id, ierr)
