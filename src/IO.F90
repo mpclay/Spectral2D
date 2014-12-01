@@ -290,8 +290,8 @@ CONTAINS
    !> @param[in] rank MPI rank in the main process list.
    !> @param[in] num Number of the restart file.
    !> @param[in] rISize Size of real data arrays in the i direction.
-   !> @param[in] nxW Number of cells in the x direction for the simulation.
-   !> @param[in] nyW Number of cells in the y direction for the simulation.
+   !> @param[in] nxG Number of cells in the x direction for the simulation.
+   !> @param[in] nyG Number of cells in the y direction for the simulation.
    !> @param[in] nxP Number of cells in the x direction for this process.
    !> @param[in] nyP Number of cells in the y direction for this process.
    !> @param[in] i1 Starting i index for this process.
@@ -303,7 +303,7 @@ CONTAINS
    !> @param[in] psi Streamfunction in the domain.
    !> @param[in] u Velocity in the x direction.
    !> @param[in] v Velocity in the y direction.
-   SUBROUTINE WriteRestartHDF5(comm, rank, num, rISize, nxW, nyW, &
+   SUBROUTINE WriteRestartHDF5(comm, rank, num, rISize, nxG, nyG, &
                                nxP, nyP, i1, j1, nadv, time, nu, w, psi, u, v)
       ! Required modules.
       USE HDF5
@@ -311,9 +311,9 @@ CONTAINS
       IMPLICIT NONE
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: comm, rank, num
-      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, nxW, nyW, nxP, nyP, i1, j1, nadv
+      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, nxG, nyG, nxP, nyP, i1, j1, nadv
       REAL(KIND=RWPC),INTENT(IN) :: time, nu
-      REAL(KIND=RWPC),DIMENSION(rISize,nyW),INTENT(IN) :: w, psi, u, v
+      REAL(KIND=RWPC),DIMENSION(rISize,nyP),INTENT(IN) :: w, psi, u, v
       ! Local variables.
       ! Name for the restart file.
       CHARACTER(LEN=FILE_NAME_LENGTH) :: fname
@@ -359,7 +359,7 @@ CONTAINS
       block = [INT(nxP, HSIZE_T), INT(nyP, HSIZE_T)]
 
       ! Dimensions of the complete restart file.
-      dimsT = [INT(nxW, HSIZE_T), INT(nyW, HSIZE_T)]
+      dimsT = [INT(nxG, HSIZE_T), INT(nyG, HSIZE_T)]
 
       ! Initialize the Fortran-HDF5 interface.
       CALL H5OPEN_F(ierr)
@@ -385,8 +385,8 @@ CONTAINS
                        dataset_id, ierr)
 
       ! Write header attributes.
-      CALL WriteAttribute(dataset_id, H5T_NATIVE_INTEGER, 'nx', nxW)
-      CALL WriteAttribute(dataset_id, H5T_NATIVE_INTEGER, 'ny', nyW)
+      CALL WriteAttribute(dataset_id, H5T_NATIVE_INTEGER, 'nx', nxG)
+      CALL WriteAttribute(dataset_id, H5T_NATIVE_INTEGER, 'ny', nyG)
       CALL WriteAttribute(dataset_id, H5T_NATIVE_INTEGER, 'nadv', nadv)
       CALL WriteAttribute(dataset_id, H5T_NATIVE_DOUBLE, 'time', time)
       CALL WriteAttribute(dataset_id, H5T_NATIVE_DOUBLE, 'nu', nu)
@@ -401,13 +401,13 @@ CONTAINS
       CALL H5GCREATE_F(file_id, 'FlowData', group_id, ierr)
 
       ! Write the data to the file using collective writeout.
-      CALL WritePHDF5Dataset(nxP, nyP, group_id, 'Omega', w(1:nxW,1:nyW), &
+      CALL WritePHDF5Dataset(nxP, nyP, group_id, 'Omega', w(1:nxP,1:nyP), &
                              offset, counter, stride, block, dimsT)
-      CALL WritePHDF5Dataset(nxP, nyP, group_id, 'Psi', psi(1:nxW,1:nyW), &
+      CALL WritePHDF5Dataset(nxP, nyP, group_id, 'Psi', psi(1:nxP,1:nyP), &
                              offset, counter, stride, block, dimsT)
-      CALL WritePHDF5Dataset(nxP, nyP, group_id, 'u', u(1:nxW,1:nyW), offset, &
+      CALL WritePHDF5Dataset(nxP, nyP, group_id, 'u', u(1:nxP,1:nyP), offset, &
                              counter, stride, block, dimsT)
-      CALL WritePHDF5Dataset(nxP, nyP, group_id, 'v', v(1:nxW,1:nyW), offset, &
+      CALL WritePHDF5Dataset(nxP, nyP, group_id, 'v', v(1:nxP,1:nyP), offset, &
                              counter, stride, block, dimsT)
 
       ! Close the 'FlowData' data group.
@@ -420,7 +420,7 @@ CONTAINS
       CALL H5CLOSE_F(ierr)
 
       ! Write out the xml file needed to view the HDF5 data in Xdmf format.
-      CALL WriteXMF(nxW, nyW, num)
+      CALL WriteXMF(nxG, nyG, num)
    END SUBROUTINE WriteRestartHDF5
 
    !> Routine to write a chunk of data with parallel HDF5 to a specified file
