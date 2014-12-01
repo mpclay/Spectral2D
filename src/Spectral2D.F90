@@ -17,6 +17,16 @@
 !> @file Spectral2D.F90
 !> @author Matthew Clay
 !> @brief 2D Navier-Stokes solver using a pseudo-spectral method.
+!!
+!! This code solves the two-dimensional incompressible Navier-Stokes equations
+!! in streamfunction-vorticity formulation with a pseudo-spectral scheme. The
+!! equations are solved in Fourier space, with nonlinear terms being evaluated
+!! pseudo-spectrally. Time integration is performed with Shu's TVD RK3 scheme.
+!!
+!! The DFTs required for the psuedo-spectral scheme are conducted using the
+!! MPI-parallelized version of FFTW. All transforms are in-place. Currently,
+!! a final data transposition is used in FFTW to realign the i memory direction
+!! with the x coordinate direction. This could be relaxed to increase speed.
 PROGRAM Spectral2D_p
 
    ! Required modules.
@@ -25,11 +35,12 @@ PROGRAM Spectral2D_p
    USE MPI
    USE Parameters_m,ONLY: IWPF, RWPF, IWPC, RWPC, CWPC, PI
    USE Alloc_m,ONLY: GetAllocSize, Alloc, Dealloc
-   USE Spectral_m,ONLY: GetGridSize, SpectralSetup, SpectralFinalize, &
+   USE Spectral_m,ONLY: GetGridSize, SetupMask, SetupPlans, SpectralFinalize, &
                         TransformR2C, TransformC2R, ComputeVelocity, &
                         NO_DEALIASING, DEALIAS_3_2_RULE, DEALIAS_2_3_RULE
    USE TimeIntegration_m,ONLY: TimeIntegrationSetup, IntegrateOneStep, &
-                               ComputeTimeStep, RK3_TVD_SHU
+                               ComputeTimeStep, RK3_TVD_SHU, &
+                               TimeIntegrationFinalize
    USE SetIC_m,ONLY: TAYLOR_GREEN_VORTEX, SetTaylorGreen
    USE IO_m,ONLY: FileName, WriteGridHDF5, WriteRestart, FILE_NAME_LENGTH, &
                   HDF5_OUTPUT
@@ -77,9 +88,9 @@ PROGRAM Spectral2D_p
    ! Parameters required for constant time stepping.
    !
    !> Number of steps for the simulation.
-   INTEGER(KIND=IWPF),PARAMETER :: stepEnd = 10000_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: stepEnd = 100_IWPF
    !> Simulation time step.
-   REAL(KIND=RWPC) :: dt = 1.0e-4_RWPC
+   REAL(KIND=RWPC) :: dt = 1.0e-2_RWPC
    !
    ! Parameters required for dynamic time stepping.
    !
@@ -89,9 +100,9 @@ PROGRAM Spectral2D_p
    ! Parameters to determine when data will be written.
    !
    !> Number of steps after which to write a data file.
-   INTEGER(KIND=IWPF),PARAMETER :: writePeriod = 10000_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: writePeriod = 100_IWPF
    !> Number of steps after which to print info to the user.
-   INTEGER(KIND=IWPF),PARAMETER :: printPeriod = 1000_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: printPeriod = 10_IWPF
    !
    ! Parameters to control initial conditions.
    !
@@ -104,17 +115,10 @@ PROGRAM Spectral2D_p
    INTEGER(KIND=IWPF) :: rank
    !> Number of processes in MPI_COMM_WORLD.
    INTEGER(KIND=IWPF) :: nprc
-
-   ! Variables related to number of variables, storage size, etc.
-   !
-   !> Number of variables in the Q array for the simulation.
-   INTEGER(KIND=IWPF) :: nVar = 2_IWPF
-   !> Number of storage locations for time integration.
-   INTEGER(KIND=IWPF) :: nStg
-   !> Index for current stage in time in the Q array.
-   INTEGER(KIND=IWPF) :: cS
-   !> Index for the next stage in time in the Q array.
-   INTEGER(KIND=IWPF) :: nS
+   !> Send buffers for determining max/min of vorticity and psi.
+   REAL(KIND=RWPF),DIMENSION(2) :: maxSendBuff, minSendBuff
+   !> Receive buffers for determining max/min of vorticity and psi.
+   REAL(KIND=RWPF),DIMENSION(2) :: maxRecvBuff, minRecvBuff
    !
    ! Global grid and wavenumber variables.
    !
@@ -145,27 +149,49 @@ PROGRAM Spectral2D_p
    !
    ! Local grid and wavenumber variables.
    !
+   !> Number of grid points in the x direction for this process.
+   INTEGER(KIND=IWPF) :: nxP
    !> Number of j columns given to this process by FFTW.
-   INTEGER(KIND=IWPF) :: jSize
+   INTEGER(KIND=IWPF) :: nyP
    !> Local j offset based on FFTW decomposition.
    INTEGER(KIND=IWPF) :: localJ
    !> Starting j index for this process.
    INTEGER(KIND=IWPF) :: j1
    !> Ending j index for this process.
    INTEGER(KIND=IWPF) :: j2
+   !> Size of data arrays as required by FFTW (includes MPI padding).
+   INTEGER(KIND=IWPF) :: allocLocal
    !> Size of the i dimension for real data arrays.
    INTEGER(KIND=IWPF) :: rISize
    !> Size of the i dimension for complex data arrays.
    INTEGER(KIND=IWPF) :: cISize
+   !> Lowest x wavenumber on this process.
+   INTEGER(KIND=IWPF) :: kxLP
+   !> Maximum x wavenumber on this process.
+   INTEGER(KIND=IWPF) :: kxMP
+   !> Lowest y wavenumber on this process.
+   INTEGER(KIND=IWPF) :: kyLP
+   !> Maximum y wavenumber on this process.
+   INTEGER(KIND=IWPF) :: kyMP
+   !> Array of wavenumbers in the x direction for this process.
+   INTEGER(KIND=IWPF),DIMENSION(:),ALLOCATABLE :: kxP
+   !> Array of wavenumbers in the y direction for this process.
+   INTEGER(KIND=IWPF),DIMENSION(:),ALLOCATABLE :: kyP
    !
    ! Main working arrays for the simulation.
    !
-   !> Data array for the simulation.
-   TYPE(C_PTR) :: Q
-   !> Real cast of Q for working in physical space.
-   REAL(KIND=RWPC),DIMENSION(:,:,:,:),POINTER :: Qr
-   !> Complex cast of Q for working in spectral space.
-   COMPLEX(KIND=CWPC),DIMENSION(:,:,:,:),POINTER :: Qc
+   !> Data array for the vorticity.
+   TYPE(C_PTR) :: w
+   !> Real cast of the vorticity.
+   REAL(KIND=RWPC),DIMENSION(:,:),POINTER :: wR
+   !> Complex cast of the vorticity.
+   COMPLEX(KIND=CWPC),DIMENSION(:,:),POINTER :: wC
+   !> Data array for the streamfunction.
+   TYPE(C_PTR) :: psi
+   !> Real cast of the streamfunction.
+   REAL(KIND=RWPC),DIMENSION(:,:),POINTER :: psiR
+   !> Complex cast of the streamfunction.
+   COMPLEX(KIND=CWPC),DIMENSION(:,:),POINTER :: psiC
    !> Data array for the u velocity and nonlinear term.
    TYPE(C_PTR) :: u
    !> Real cast of u for working in physical space.
@@ -185,7 +211,7 @@ PROGRAM Spectral2D_p
    REAL(KIND=RWPF) :: time = 0.0_RWPC
    !> Current simluation step.
    INTEGER(KIND=IWPF) :: nadv = 0_IWPF
-
+   !
    ! Extraneous variables.
    !
    !> Looping indices.
@@ -212,55 +238,62 @@ PROGRAM Spectral2D_p
    CALL FFTW_MPI_INIT()
 
    ! Determine the working number of grid points based on the dealiasing
-   ! technique being used in the simulation.
+   ! technique being used in the simulation. Also calculated min/max wavenums.
    CALL GetGridSize(nx, ny, dealias, nxG, nyG, &
                     kxLG, kyLG, kxMG, kyMG, &
                     kxLU, kyLU, kxMU, kyMU, &
                     rISize, cISize, kxG, kyG)
 
+   ! Get the allocation sizes as determined by the MPI FFTW routines.
+   CALL GetAllocSize(nxG, nyG, kxG, kyG, kxMU, cISize, nxP, nyP, j1, j2, &
+                     localJ, allocLocal, kxLP, kyLP, kxMP, kyMP, kxP, kyP)
+
+   ! Set up masked wavenumbers for differentiation.
+   CALL SetupMask(cISize, nyP, kxP, kyP, kxMG, kyMG)
+
    ! Write out the grid.
    CALL FileName('GRID', 'h5', fname)
-   CALL WriteGridHDF5(MPI_COMM_WORLD, rank, fname, nxG, nyG, nxG, nyG, &
-                      1_IWPF, nxG, 1_IWPF, nyG)
+   CALL WriteGridHDF5(MPI_COMM_WORLD, rank, fname, nxG, nyG, nxP, nyP, &
+                      1_IWPF, nxP, j1, j2)
 
-   ! Get the allocation sizes as determined by FFTW.
-   CALL GetAllocSize(nxG, nyG, j1, j2, jSize, localJ)
-
-   ! Initialize the time integration module. This also sets nStg for Q.
-   CALL TimeIntegrationSetup(timeScheme, rISize, cISize, nyG, nStg, cS, nS)
+   ! Initialize the time integration module.
+   CALL TimeIntegrationSetup(timeScheme, rISize, cISize, nyP, allocLocal)
 
    ! Allocate memory for the simulation.
-   CALL Alloc(cISize, nyG, nVar, nStg, Q)
-   CALL Alloc(cISize, nyG, u)
-   CALL Alloc(cISize, nyG, v)
+   CALL Alloc(allocLocal, w)
+   CALL Alloc(allocLocal, psi)
+   CALL Alloc(allocLocal, u)
+   CALL Alloc(allocLocal, v)
    !
-   ! Create real and complex casts of Q for use in physical/spectral space.
-   CALL C_F_POINTER(Q, Qr, [rISize,nyG,nVar,nStg])
-   CALL C_F_POINTER(Q, Qc, [cISize,nyG,nVar,nStg])
-   Qc(:,:,:,:) = (0.0_RWPC, 0.0_RWPC)
-   CALL C_F_POINTER(u, uR, [rISize,nyG])
-   CALL C_F_POINTER(u, uC, [cISize,nyG])
+   ! Create real/complex casts of arrays for use in physical/spectral space.
+   CALL C_F_POINTER(w, wR, [rISize,nyP])
+   CALL C_F_POINTER(w, wC, [cISize,nyP])
+   wC(:,:) = (0.0_RWPC, 0.0_RWPC)
+   CALL C_F_POINTER(psi, psiR, [rISize,nyP])
+   CALL C_F_POINTER(psi, psiC, [cISize,nyP])
+   psiC(:,:) = (0.0_RWPC, 0.0_RWPC)
+   CALL C_F_POINTER(u, uR, [rISize,nyP])
+   CALL C_F_POINTER(u, uC, [cISize,nyP])
    uC(:,:) = (0.0_RWPC, 0.0_RWPC)
-   CALL C_F_POINTER(v, vR, [rISize,nyG])
-   CALL C_F_POINTER(v, vC, [cISize,nyG])
+   CALL C_F_POINTER(v, vR, [rISize,nyP])
+   CALL C_F_POINTER(v, vC, [cISize,nyP])
    vC(:,:) = (0.0_RWPC, 0.0_RWPC)
 
    ! Initialize the FFT module, which creates the FFTW plans.
-   CALL SpectralSetup(nxG, nyG, rISize, cISize, nVar, nStg, Qr, Qc)
+   CALL SetupPlans(nxG, nyG, nyP, rISize, cISize, wR, wC)
 
    ! Set the initial conditions.
    SELECT CASE (ics)
       CASE (TAYLOR_GREEN_VORTEX)
-         CALL SetTaylorGreen(nxG, nyG, rISize, cISize, &
-                             Qc(:,:,1,1), Qr(:,:,1,1), Qc(:,:,2,1), Qr(:,:,2,1))
+         CALL SetTaylorGreen(nxG, nyG, nxP, nyP, j1, j2, rISize, cISize, &
+                             wC, wR, psiC, psiR)
       CASE DEFAULT
    END SELECT
    !
    ! Write out a restart file.
-   CALL WriteRestart(nxG, nyG, nxG, nyG, 1_IWPF, 1_IWPF, 1_IWPF, 1_IWPF, &
-                     rISize, cISize, kxG, kyG, rank, nadv, time, nu, &
-                     HDF5_OUTPUT, uC, uR, vC, vR, Qc(:,:,1,1), Qr(:,:,1,1), &
-                     Qc(:,:,2,1), Qr(:,:,2,1))
+   CALL WriteRestart(nxG, nyG, nxP, nyP, 1_IWPF, nxP, j1, j2, &
+                     rISize, cISize, kxP, kyP, rank, nadv, time, nu, &
+                     HDF5_OUTPUT, uC, uR, vC, vR, wC, wR, psiC, psiR)
 
    ! Enter the main time stepping loop.
    loopBool = .TRUE.
@@ -268,12 +301,11 @@ PROGRAM Spectral2D_p
    writeBool = .FALSE.
    printBool = .FALSE.
    tloop: DO WHILE (loopBool)
-      ! Increment the Q array by 1 time step.
+      ! Increment the vorticity and streamfunction arrays by one time step.
       !
-      ! NOTE: The only arrays that are correct after this step are Qr and Qc.
-      CALL IntegrateOneStep(nxG, nyG, rISize, cISize, kxG, kyG, &
-                            nu, dt, nVar, nStg, cS, nS, &
-                            uC, uR, vC, vR, Qc, Qr)
+      ! NOTE: The only arrays that are correct after this step are wC and psiC.
+      CALL IntegrateOneStep(nxG, nyG, nxP, nyP, rISize, cISize, kxP, kyP, &
+                            nu, dt, uC, uR, vC, vR, wC, wR, psiC, psiR)
 
       ! Increment the time and step counters.
       time = time + dt
@@ -286,13 +318,29 @@ PROGRAM Spectral2D_p
       IF (printBool .OR. exitThisStep) THEN
          printStep = printStep + printPeriod
          printBool = .FALSE.
-         WRITE(OUTPUT_UNIT,500) 'Simulation step number: ', nadv, &
-                                '; Simulation time: ', time, &
-                                '; Max W: ', MAXVAL(ABS(Qc(:,:,1,cS))), &
-                                '; Min W: ', MINVAL(ABS(Qc(:,:,1,cS))), &
-                                '; Max Psi: ', MAXVAL(ABS(Qc(:,:,2,cS))), &
-                                '; Min Psi: ', MINVAL(ABS(Qc(:,:,2,cS)))
-         500 FORMAT (A,I8.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8)
+         !
+         ! Each process calculates the min/max of wC and psiC.
+         maxSendBuff(1) = MAXVAL(ABS(wC(1:cISize,1:nyP)))
+         maxSendBuff(2) = MAXVAL(ABS(psiC(1:cISize,1:nyP)))
+         minSendBuff(1) = MINVAL(ABS(wC(1:cISize,1:nyP)))
+         minSendBuff(2) = MINVAL(ABS(psiC(1:cISize,1:nyP)))
+         !
+         ! Reduce the values to the root process.
+         CALL MPI_REDUCE(maxSendBuff, maxRecvBuff, 2, MPI_DOUBLE, MPI_MAX, &
+                         0, MPI_COMM_WORLD, ierr)
+         CALL MPI_REDUCE(minSendBuff, minRecvBuff, 2, MPI_DOUBLE, MPI_MIN, &
+                         0, MPI_COMM_WORLD, ierr)
+         !
+         ! The root process prints the info to the screen for monitoring.
+         IF (rank == 0_IWPF) THEN
+            WRITE(OUTPUT_UNIT,500) 'Simulation step number: ', nadv, &
+                                   '; Simulation time: ', time, &
+                                   '; Max W: ', maxRecvBuff(1), &
+                                   '; Min W: ', minRecvBuff(1), &
+                                   '; Max Psi: ', maxRecvBuff(2), &
+                                   '; Min Psi: ', minRecvBuff(2)
+            500 FORMAT (A,I8.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8,A,ES15.8)
+         END IF
       ELSE
          IF (nadv + 1_IWPF == printStep) THEN
             printBool = .TRUE.
@@ -303,10 +351,9 @@ PROGRAM Spectral2D_p
       IF (writeBool .OR. exitThisStep) THEN
          writeStep = writeStep + writePeriod
          writeBool = .FALSE.
-         CALL WriteRestart(nxG, nyG, nxG, nyG, 1_IWPF, 1_IWPF, 1_IWPF, 1_IWPF, &
-                           rISize, cISize, kxG, kyG, rank, nadv, time, nu, &
-                           HDF5_OUTPUT, uC, uR, vC, vR, Qc(:,:,1,cS), &
-                           Qr(:,:,1,cS), Qc(:,:,2,cS), Qr(:,:,2,cS))
+         CALL WriteRestart(nxG, nyG, nxP, nyP, 1_IWPF, nxP, j1, j2, &
+                           rISize, cISize, kxP, kyP, rank, nadv, time, nu, &
+                           HDF5_OUTPUT, uC, uR, vC, vR, wC, wR, psiC, psiR)
       ELSE
          IF (nadv + 1_IWPF == writeStep) THEN
             writeBool = .TRUE.
@@ -333,7 +380,23 @@ PROGRAM Spectral2D_p
    END DO tloop
 
    ! Finalize the program.
-   CALL Dealloc(Q)
+   CALL Dealloc(w)
+   CALL Dealloc(psi)
+   CALL Dealloc(u)
+   CALL Dealloc(v)
+   wR => NULL()
+   wC => NULL()
+   psiR => NULL()
+   psiC => NULL()
+   uR => NULL()
+   uC => NULL()
+   vR => NULL()
+   vC => NULL()
+   DEALLOCATE(kxG)
+   DEALLOCATE(kyG)
+   DEALLOCATE(kxP)
+   DEALLOCATE(kyP)
+   CALL TimeIntegrationFinalize()
    CALL SpectralFinalize()
    CALL MPI_FINALIZE(ierr)
 

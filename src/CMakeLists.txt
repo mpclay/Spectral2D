@@ -17,11 +17,9 @@
 # Core source files that are program independent.
 SET(CORE_SOURCE_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/Parameters.F90
-    ${CMAKE_CURRENT_SOURCE_DIR}/Messages.F90
     ${CMAKE_CURRENT_SOURCE_DIR}/Alloc.F90
     ${CMAKE_CURRENT_SOURCE_DIR}/SetIC.F90
     ${CMAKE_CURRENT_SOURCE_DIR}/IO.F90
-    ${CMAKE_CURRENT_SOURCE_DIR}/Analysis.F90
     ${CMAKE_CURRENT_SOURCE_DIR}/Spectral.F90
     ${CMAKE_CURRENT_SOURCE_DIR}/TimeIntegration.F90
     CACHE INTERNAL "Core source files.")

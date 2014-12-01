@@ -16,7 +16,18 @@
 !
 !> @file TimeIntegration.F90
 !> @author Matthew Clay
-!> @brief Time integration schemes.
+!> @brief Time integration module.
+!!
+!! Right now this module only implements the TVD RK3 scheme of Shu. This is a
+!! low-storage scheme, which is able to work with the data array allocation in
+!! the main code. By that we mean that it is not straightforward to use a Q
+!! array for multiple variables and time stages with the allocation procedure
+!! of MPI FFTW. Because the MPI FFTW routines require larger arrays than the
+!! actual (cISize X nyP) number of complex variables, and we cannot cast that
+!! array in a manner that can be easily used in Fortran, we are stuck with
+!! individual arrays for each variable. In the future, we can probably achieve
+!! the desired effect by casting arrays like (1:allocLocal,1:nVar,1:nStg) by
+!! sacrificing the desired (1:cISize,1:nyP,1:nVar,1:nStg) shape.
 MODULE TimeIntegration_m
 
    ! Required modules.
@@ -37,12 +48,24 @@ MODULE TimeIntegration_m
 
    ! Scratch arrays for time integration.
    !
-   !> Increment of Q for the useful wavenumbers in the simulation.
-   COMPLEX(KIND=CWPC),DIMENSION(:,:),ALLOCATABLE,PRIVATE :: dQ
+   !> Increment of vorticity.
+   COMPLEX(KIND=CWPC),DIMENSION(:,:),ALLOCATABLE,PRIVATE :: dW
+   !> Scratch data array for the vorticity.
+   TYPE(C_PTR) :: wS
+   !> Real cast of the scratch vorticity array.
+   REAL(KIND=RWPC),DIMENSION(:,:),POINTER :: wSR
+   !> Complex cast of the scratch vorticity array.
+   COMPLEX(KIND=CWPC),DIMENSION(:,:),POINTER :: wSC
+   !> Scratch data array for the streamfunction.
+   TYPE(C_PTR) :: psiS
+   !> Real cast of the scratch streamfunction array.
+   REAL(KIND=RWPC),DIMENSION(:,:),POINTER :: psiSR
+   !> Complex cast of the scratch streamfunction array.
+   COMPLEX(KIND=CWPC),DIMENSION(:,:),POINTER :: psiSC
 
    ! Module procedures.
-   PUBLIC :: TimeIntegrationSetup, IntegrateOneStep, ComputeTimeStep
-   PRIVATE :: RK3TVDTimeUpdate
+   PUBLIC :: TimeIntegrationSetup, TimeIntegrationFinalize
+   PUBLIC :: IntegrateOneStep, ComputeTimeStep
 
 CONTAINS
 
@@ -51,134 +74,127 @@ CONTAINS
    !> @param[in] scheme_ Which time integration scheme to use.
    !> @param[in] cISize Size of i dimension for complex numbers.
    !> @param[in] rISize Size of i dimension for real numbers.
-   !> @param[in] nyG Global number of grid points in the y direction.
-   !> @param[out] nStg Number of stages needed for time integration scheme.
-   !> @param[out] cS Location in Q for this time stage.
-   !> @param[out] nS Location in Q for next time stage.
-   SUBROUTINE TimeIntegrationSetup(scheme_, rISize, cISize, nyG, nStg, cS, nS)
+   !> @param[in] nyP Number of grid points in the y direction on this process.
+   !> @param[in] allocLocal Size of data arrays required by FFTW MPI.
+   SUBROUTINE TimeIntegrationSetup(scheme_, rISize, cISize, nyP, allocLocal)
       ! Required modules.
       USE ISO_C_BINDING,ONLY: C_F_POINTER
       USE Alloc_m,ONLY: Alloc
       IMPLICIT NONE
       ! Calling arguments.
-      INTEGER(KIND=IWPF),INTENT(IN) :: scheme_, rISize, cISize, nyG
-      INTEGER(KIND=IWPF),INTENT(OUT) :: nStg, cS, nS
+      INTEGER(KIND=IWPF),INTENT(IN) :: scheme_, rISize, cISize, nyP, allocLocal
 
       ! Set which scheme we are going to use.
       SELECT CASE (scheme_)
          CASE (RK3_TVD_SHU)
             ! This is a low-storage scheme. Only two storage locations needed.
             scheme = RK3_TVD_SHU
-            nStg = 2_IWPF
-            cS = 1_IWPF
-            nS = 2_IWPF
          CASE DEFAULT
             ! Add warning message.
       END SELECT
 
       ! Allocate memory for scratch arrays.
-      CALL Alloc(cISize, nyG, 1_IWPF, 1_IWPF, dQ)
+      CALL Alloc(cISize, nyP, 1_IWPF, 1_IWPF, dW)
+      CALL Alloc(allocLocal, wS)
+      CALL Alloc(allocLocal, psiS)
+      !
+      ! Cast useable portions of the arrays for fortran use.
+      CALL C_F_POINTER(wS, wSR, [rISize,nyP])
+      CALL C_F_POINTER(wS, wSC, [cISize,nyP])
+      wSC(:,:) = (0.0_RWPC, 0.0_RWPC)
+      CALL C_F_POINTER(psiS, psiSR, [rISize,nyP])
+      CALL C_F_POINTER(psiS, psiSC, [cISize,nyP])
+      psiSC(:,:) = (0.0_RWPC, 0.0_RWPC)
    END SUBROUTINE TimeIntegrationSetup
 
    !> Subroutine to advance one step in time.
    !!
-   !> @param[in] nxG Number of grid points in the x direction.
-   !> @param[in] nyG Number of grid points in the y direction.
+   !> @param[in] nxG Total number of grid points in the x direction.
+   !> @param[in] nyG Total number of grid points in the y direction.
+   !> @param[in] nxP Number of x grid points for this process.
+   !> @param[in] nyP Number of y grid points for this process.
    !> @param[in] rISize Size of i dimension for real numbers.
    !> @param[in] cISize Size of i dimension for complex numbers.
-   !> @param[in] kxG Array of wavenumbers for the x direction.
-   !> @param[in] kyG Array of wavenumbers for the y direction.
+   !> @param[in] kxP Array of wavenumbers for the x direction for this process.
+   !> @param[in] kyP Array of wavenumbers for the y direction for this process.
    !> @param[in] nu Physical viscosity.
    !> @param[in] dt Time step.
-   !> @param[in] nVar Number of variables in Q.
-   !> @param[in] nStg Number of stages in Q for time stepping.
-   !> @param[in,out] cS Current stage. Stage in Q that is for current step.
-   !> @param[in,out] nS Next stage. Stage in Q to hold updated step.
-   !> @param[in] uC Complex cast of u velocity array.
-   !> @param[in] uR Real cast of u velocity array.
-   !> @param[in] vC Complex cast of v velocity array.
-   !> @param[in] vR Real cast of v velocity array.
-   !> @param[in] Qc Complex cast of Q array.
-   !> @param[in] Qr Real cast of Q array.
-   SUBROUTINE IntegrateOneStep(nxG, nyG, rISize, cISize, kxG, kyG, &
-                               nu, dt, nVar, nStg, cS, nS, &
-                               uC, uR, vC, vR, Qc, Qr)
+   !> @param[in,out] uC Complex cast of u velocity array.
+   !> @param[in,out] uR Real cast of u velocity array.
+   !> @param[in,out] vC Complex cast of v velocity array.
+   !> @param[in,out] vR Real cast of v velocity array.
+   !> @param[in,out] wC Complex cast of vorticity array.
+   !> @param[in,out] wR Real cast of vorticity array.
+   !> @param[in,out] psiC Complex cast of streamfunction array.
+   !> @param[in,out] psiR Real cast of streamfunction array.
+   SUBROUTINE IntegrateOneStep(nxG, nyG, nxP, nyP, rISize, cISize, kxP, kyP, &
+                               nu, dt, uC, uR, vC, vR, wC, wR, psiC, psiR)
       ! Required modules.
       USE Spectral_m,ONLY: ComputeRHS, ComputePsi
       IMPLICIT NONE
       ! Calling arguments.
-      INTEGER(KIND=IWPF),INTENT(IN) :: nxG, nyG, rISize, cISize
-      INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxG
-      INTEGER(KIND=IWPF),DIMENSION(nyG),INTENT(IN) :: kyG
+      INTEGER(KIND=IWPF),INTENT(IN) :: nxG, nyG, nxP, nyP, rISize, cISize
+      INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxP
+      INTEGER(KIND=IWPF),DIMENSION(nyP),INTENT(IN) :: kyP
       REAL(KIND=RWPC),INTENT(IN) :: nu, dt
-      INTEGER(KIND=IWPF),INTENT(IN) :: nVar, nStg
-      INTEGER(KIND=IWPF),INTENT(INOUT) :: cS, nS
-      COMPLEX(KIND=CWPC),DIMENSION(cISize,nyG),INTENT(INOUT) :: uC, vC
-      REAL(KIND=RWPC),DIMENSION(rISize,nyG),INTENT(INOUT) :: uR, vR
-      COMPLEX(CWPC),DIMENSION(cISize,nyG,nVar,nStg),INTENT(INOUT) :: Qc
-      REAL(KIND=RWPC),DIMENSION(rISize,nyG,nVar,nStg),INTENT(INOUT) :: Qr
+      COMPLEX(KIND=CWPC),DIMENSION(cISize,nyP),INTENT(INOUT) :: uC, vC, wC, psiC
+      REAL(KIND=RWPC),DIMENSION(rISize,nyP),INTENT(INOUT) :: uR, vR, wR, psiR
       ! Local variables.
       ! Looping indices.
       INTEGER(KIND=IWPF) :: i, j
 
       ! Zero out everything in the next stage holder and dQ.
-      Qc(:,:,:,nS) = (0.0_RWPC, 0.0_RWPC)
-      dQ(:,:) = (0.0_RWPC, 0.0_RWPC)
-
+      wSC(:,:) = (0.0_RWPC, 0.0_RWPC)
+      psiSC(:,:) = (0.0_RWPC, 0.0_RWPC)
+      dW(:,:) = (0.0_RWPC, 0.0_RWPC)
+      !
       ! Calculate the RHS with the data at the start of the time step.
-      CALL ComputeRHS(nxG, nyG, rISize, cISize, &
-                      kxG, kyG, nu, nVar, &
-                      uC, uR, vC, vR, Qc(:,:,:,cS), Qr(:,:,:,cS), dQ)
+      CALL ComputeRHS(nxG, nyG, nxP, nyP, rISize, cISize, kxP, kyP, nu, &
+                      uC, uR, vC, vR, wC, wR, psiC, psiR, dW)
       !
       ! Determine omega at the first intermediate RK stage.
-      DO j = 1, nyG
+      DO j = 1, nyP
          DO i = 1, cISize
-            Qc(i,j,1,nS) = Qc(i,j,1,cS) + dt*dQ(i,j)
+            wSC(i,j) = wC(i,j) + dt*dW(i,j)
          END DO
       END DO
       !
       ! Now with vorticity updated, solve for the streamfunction.
-      CALL ComputePsi(cISize, nyG, kxG, kyG, Qc(:,:,1,nS), Qc(:,:,2,nS))
+      CALL ComputePsi(cISize, nyP, kxP, kyP, wSC, psiSC)
 
       ! Calculate the RHS using the first intermediate stage.
-      dQ(:,:) = (0.0_RWPC, 0.0_RWPC)
-      CALL ComputeRHS(nxG, nyG, rISize, cISize, &
-                      kxG, kyG, nu, nVar, &
-                      uC, uR, vC, vR, Qc(:,:,:,nS), Qr(:,:,:,nS), dQ)
+      dW(:,:) = (0.0_RWPC, 0.0_RWPC)
+      CALL ComputeRHS(nxG, nyG, nxP, nyP, rISize, cISize, kxP, kyP, nu, &
+                      uC, uR, vC, vR, wSC, wSR, psiSC, psiSR, dW)
       !
       ! Determine the vorticity at the second intermediate RK stage.
-      DO j = 1, nyG
+      DO j = 1, nyP
          DO i = 1, cISize
-            Qc(i,j,1,nS) = 0.75_RWPC*Qc(i,j,1,cS) + &
-                           0.25_RWPC*Qc(i,j,1,nS) + &
-                           0.25_RWPC*dt*dq(i,j)
+            wSC(i,j) = 0.75_RWPC*wC(i,j) + &
+                       0.25_RWPC*wSC(i,j) + &
+                       0.25_RWPC*dt*dW(i,j)
          END DO
       END DO
       !
       ! Now with vorticity updated, solve for the streamfunction.
-      CALL ComputePsi(cISize, nyG, kxG, kyG, Qc(:,:,1,nS), Qc(:,:,2,nS))
+      CALL ComputePsi(cISize, nyP, kxP, kyP, wSC, psiSC)
 
       ! Calculate the RHS using the second intermediate stage.
-      dQ(:,:) = (0.0_RWPC, 0.0_RWPC)
-      CALL ComputeRHS(nxG, nyG, rISize, cISize, &
-                      kxG, kyG, nu, nVar, &
-                      uC, uR, vC, vR, Qc(:,:,:,nS), Qr(:,:,:,nS), dQ)
+      dW(:,:) = (0.0_RWPC, 0.0_RWPC)
+      CALL ComputeRHS(nxG, nyG, nxP, nyP, rISize, cISize, kxP, kyP, nu, &
+                      uC, uR, vC, vR, wSC, wSR, psiSC, psiSR, dW)
       !
       ! Determine the vorticity at the next time step.
-      DO j = 1, nyG
+      DO j = 1, nyP
          DO i = 1, cISize
-            Qc(i,j,1,cS) = Qc(i,j,1,cS)/3.0_RWPC + &
-                           2.0_RWPC*Qc(i,j,1,nS)/3.0_RWPC + &
-                           dt*2.0_RWPC*dQ(i,j)/3.0_RWPC
+            wC(i,j) = wC(i,j)/3.0_RWPC + &
+                      2.0_RWPC*wSC(i,j)/3.0_RWPC + &
+                      dt*2.0_RWPC*dW(i,j)/3.0_RWPC
          END DO
       END DO
       !
       ! Now with vorticity updated, solve for the streamfunction.
-      CALL ComputePsi(cISize, nyG, kxG, kyG, Qc(:,:,1,cS), Qc(:,:,2,cS))
-
-      ! For this low-storage scheme we do not change cS from 1.
-      cS = 1_IWPF
-      nS = 2_IWPF
+      CALL ComputePsi(cISize, nyP, kxP, kyP, wC, psiC)
    END SUBROUTINE IntegrateOneStep
 
    !> Subroutine to calculate the time step.
@@ -186,10 +202,23 @@ CONTAINS
       IMPLICIT NONE
    END SUBROUTINE ComputeTimeStep
 
-   !> Update one step of the RK3 TVD scheme of Shu.
-   SUBROUTINE RK3TVDTimeUpdate()
+   !> Routine to finalize the time integration module.
+   SUBROUTINE TimeIntegrationFinalize()
+      ! Required modules.
+      USE ISO_C_BINDING
+      USE Alloc_m,ONLY: Dealloc
       IMPLICIT NONE
-   END SUBROUTINE RK3TVDTimeUpdate
+      INCLUDE 'fftw3-mpi.f03'
+
+      ! Free all working arrays.
+      DEALLOCATE(dW)
+      CALL Dealloc(wS)
+      CALL Dealloc(psiS)
+      wSR => NULL()
+      wSC => NULL()
+      psiSR => NULL()
+      psiSC => NULL()
+   END SUBROUTINE TimeIntegrationFinalize
 
 END MODULE TimeIntegration_m
 

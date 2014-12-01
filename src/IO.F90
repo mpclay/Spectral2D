@@ -80,8 +80,8 @@ CONTAINS
    !> @param[in] j2 Ending j index for the data on this process.
    !> @param[in] rISize Size of the i dimension for real data arrays.
    !> @param[in] cISize Size of the i dimension for complex data arrays.
-   !> @param[in] kxG Wavenumbers in the x direction.
-   !> @param[in] kyG Wavenumbers in the y direction.
+   !> @param[in] kxP Wavenumbers in the x direction for this process.
+   !> @param[in] kyP Wavenumbers in the y direction for this process.
    !> @param[in] rank MPI process ID for this process.
    !> @param[in] nadv Current simulation step.
    !> @param[in] time Current simulation time.
@@ -96,7 +96,7 @@ CONTAINS
    !> @param[in] psiC Complex cast of the streamfunction.
    !> @param[in] psiR Real cast of the streamfunction.
    SUBROUTINE WriteRestart(nxG, nyG, nxP, nyP, i1, i2, j1, j2, rISize, cISize, &
-                           kxG, kyG, rank, nadv, time, nu, outType, &
+                           kxP, kyP, rank, nadv, time, nu, outType, &
                            uC, uR, vC, vR, wC, wR, psiC, psiR)
       ! Required modules.
       USE ISO_FORTRAN_ENV,ONLY: OUTPUT_UNIT
@@ -105,8 +105,8 @@ CONTAINS
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: nxG, nyG, nxP, nyP, i1, i2, j1, j2
       INTEGER(KIND=IWPF),INTENT(IN) :: rISize, cISize, rank, nadv, outType
-      INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxG
-      INTEGER(KIND=IWPF),DIMENSION(nyP),INTENT(IN) :: kyG
+      INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxP
+      INTEGER(KIND=IWPF),DIMENSION(nyP),INTENT(IN) :: kyP
       REAL(KIND=RWPC),INTENT(IN) :: time, nu
       COMPLEX(KIND=CWPC),DIMENSION(cISize,nyP),INTENT(INOUT) :: uC, vC, wC, psiC
       REAL(KIND=RWPC),DIMENSION(rISize,nyP),INTENT(INOUT) :: uR, vR, wR, psiR
@@ -115,15 +115,17 @@ CONTAINS
       CHARACTER(LEN=FILE_NAME_LENGTH) :: fname
 
       ! Get variables ready to write out the initial restart file.
-      CALL ComputeVelocity(nxP, nyP, rISize, cISize, kxG, kyG, &
+      CALL ComputeVelocity(nxP, nyP, rISize, cISize, kxP, kyP, &
                            uC, uR, vC, vR, psiC, .TRUE.)
-      CALL TransformC2R(rISize, cISize, nyG, wC, wR)
-      CALL TransformC2R(rISize, cISize, nyG, psiC, psiR)
+      CALL TransformC2R(rISize, cISize, nyP, wC, wR)
+      CALL TransformC2R(rISize, cISize, nyP, psiC, psiR)
       !
       ! Write out the restart file.
-      WRITE(OUTPUT_UNIT,100) 'Writing REST_', restNum, '.h5 at t = ', time, &
-                             ' and nadv = ', nadv
-      100 FORMAT (A,I6.6,A,ES15.8,A,I8.8)
+      IF (rank == 0_IWPF) THEN
+         WRITE(OUTPUT_UNIT,100) 'Writing REST_', restNum, '.h5 at t = ', time, &
+                                ' and nadv = ', nadv
+         100 FORMAT (A,I6.6,A,ES15.8,A,I8.8)
+      END IF
       SELECT CASE (outType)
          CASE (HDF5_OUTPUT)
             CALL WriteRestartHDF5(MPI_COMM_WORLD, rank, restNum, rISize, &
@@ -136,8 +138,8 @@ CONTAINS
       restNum = restNum + 1_IWPF
       !
       ! Transform back to spectral space.
-      CALL TransformR2C(nxG, nyG, rISize, cISize, wR, wC)
-      CALL TransformR2C(nxG, nyG, rISize, cISize, psiR, psiC)
+      CALL TransformR2C(nxG, nyG, nyP, rISize, cISize, wR, wC)
+      CALL TransformR2C(nxG, nyG, nyP, rISize, cISize, psiR, psiC)
    END SUBROUTINE WriteRestart
 
    !> Write an HDF5 grid file.
