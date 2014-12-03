@@ -48,24 +48,16 @@ MODULE Spectral_m
 
    !> Structure used for wavenumber truncation.
    !!
-   !! We store the minimum and maximum indices in each direction for each block
-   !! of contiguous memory to be trunctated in wavenumber space. Each mode will
-   !! have a Fourier coefficient of zero in the region defined by this object.
+   !! We store the minimum and maximum i indices to truncate for each j row.
    TYPE,PRIVATE :: Truncation_t
-      !> Lower index in the x direction.
-      INTEGER(KIND=IWPF) :: kxL
-      !> Upper index in the x direction.
-      INTEGER(KIND=IWPF) :: kxU
-      !> Lower index in the y direction.
-      INTEGER(KIND=IWPF) :: kyL
-      !> Upper index in the y direction.
-      INTEGER(KIND=IWPF) :: kyU
+      !> Lower i index for truncation.
+      INTEGER(KIND=IWPF) :: i1
+      !> Upper i index for truncation.
+      INTEGER(KIND=IWPF) :: i2
    END TYPE
    !
    !> Dealiasing technique set by the calling code.
    INTEGER(KIND=IWPF),PRIVATE :: dealias
-   !> Number of contiguous memory chunks in spectral space to be truncated.
-   INTEGER(KIND=IWPF),PRIVATE :: numTrunc
    !> Data objects to store information about truncation regions.
    TYPE(Truncation_t),DIMENSION(:),ALLOCATABLE,PRIVATE :: trunc
    !
@@ -88,10 +80,12 @@ MODULE Spectral_m
    TYPE(C_PTR),PRIVATE :: c2rPlan
 
    ! Module procedures.
-   PUBLIC :: GetGridSize, SetupMask, SetupPlans, SpectralFinalize
+   PUBLIC :: GetGridSize
+   PUBLIC :: SetupMask, SetupPlans, SetupTruncation, SpectralFinalize
    PUBLIC :: ComputeRHS, ComputePsi, ComputeVelocity, ComputeVorticity
    PUBLIC :: TransformR2C, TransformC2R
    PUBLIC :: DuDx, DuDy
+   PUBLIC :: Truncate
 
 CONTAINS
 
@@ -115,6 +109,7 @@ CONTAINS
    !> @param[out] kyLU Smallest useful y wavenumber.
    !> @param[out] kxMU Largest useful x wavenumber.
    !> @param[out] kyMU Largest useful y wavenumber.
+   !> @param[out] kMax Maximum wavenumber magnitude used for truncation.
    !> @param[out] rISize Dimension of i extent for real data arrays.
    !> @param[out] cISize Dimension of i extent for complex data arrays.
    !> @param[in,out] kxG Global list of wavenumbers in the x direction.
@@ -122,7 +117,7 @@ CONTAINS
    SUBROUTINE GetGridSize(nx, ny, dealias_, nxG, nyG, &
                           kxLG, kyLG, kxMG, kyMG, &
                           kxLU, kyLU, kxMU, kyMU, &
-                          rISize, cISize, kxG, kyG)
+                          kMax, rISize, cISize, kxG, kyG)
       IMPLICIT NONE
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: nx, ny, dealias_
@@ -130,6 +125,7 @@ CONTAINS
       INTEGER(KIND=IWPF),INTENT(OUT) :: kxLG, kyLG, kxMG, kyMG
       INTEGER(KIND=IWPF),INTENT(OUT) :: kxLU, kyLU, kxMU, kyMU
       INTEGER(KIND=IWPF),INTENT(OUT) :: rISize, cISize
+      REAL(KIND=RWPF),INTENT(OUT) :: kMax
       INTEGER(KIND=IWPF),DIMENSION(:),ALLOCATABLE,INTENT(INOUT) :: kxG, kyG
       ! Local variables.
       ! Looping index for wavenumbers in the x and y directions.
@@ -159,9 +155,28 @@ CONTAINS
             kxMU = nx/2_IWPF
             kyMU = ny/2_IWPF
             !
-            ! Do not allocate any truncation objects.
-            numTrunc = 0_IWPF
+            ! Maximum wavenumber magnitude allowed by truncation.
+            kMax = REAL(kxMU, RWPF)
          CASE (DEALIAS_3_2_RULE)
+            ! The grid is multiplied by a factor of 3/2 in each direction.
+            nxG = 3_IWPF*nx/2_IWPF
+            nyG = 3_IWPF*ny/2_IWPF
+            !
+            ! The global min/max wavenumbers are controlled by nxG/nyG.
+            kxLG = 0_IWPF
+            kyLG = -nyG/2_IWPF + 1_IWPF
+            kxMG = nxG/2_IWPF
+            kyMG = nyG/2_IWPF
+            !
+            ! For the 3/2 rule, the max/min useful wavenumbers are determined
+            ! by the initial grid size.
+            kxLU = 0_IWPF
+            kyLU = -ny/2_IWPF + 1_IWPF
+            kxMU = nx/2_IWPF
+            kyMU = ny/2_IWPF
+            !
+            ! Maximum wavenumber magnitude allowed by truncation.
+            kMax = REAL(kxMU, RWPF)
          CASE (DEALIAS_2_3_RULE)
          CASE (DEALIAS_GRID_SHIFT)
          CASE DEFAULT
@@ -243,6 +258,59 @@ CONTAINS
          END IF
       END DO jLoop
    END SUBROUTINE SetupMask
+
+   !> Set up the truncation scheme being used.
+   !!
+   !! For each y row of data on a given process, we identify the starting and
+   !! ending wavenumbers that will be truncated.
+   !!
+   !> @param[in] cISize Size of i dimension for complex arrays.
+   !> @param[in] Number of points in the y direction for this process.
+   !> @param[in] kMax Maximum wavenumber magnitude allowed by truncation.
+   !> @param[in] kxP Array of x wavenumbers for this process.
+   !> @param[in] kyP Array of y wavenumbers for this process.
+   SUBROUTINE SetupTruncation(cISize, nyP, kMax, kxP, kyP)
+      IMPLICIT NONE
+      ! Calling arguments.
+      INTEGER(KIND=IWPF),INTENT(IN) :: cISIze, nyP
+      REAL(KIND=RWPF),INTENT(IN) :: kMax
+      INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxP
+      INTEGER(KIND=IWPF),DIMENSION(nyP),INTENT(IN) :: kyP
+      ! Local variables.
+      ! Magnitude of the local wavenumber.
+      REAL(KIND=RWPF) :: kMag
+      ! Wavenumbers in the x and y direction.
+      REAL(KIND=RWPF) :: kx, ky
+      ! Small epsilon to make sure we do not miss modes with kMag = kMax.
+      REAL(KIND=RWPF),PARAMETER :: eps = 1.0E-10_RWPF
+      ! Looping index for the kx and ky directions.
+      INTEGER(KIND=IWPF) :: i, j
+
+      ! Allocate memory for the truncation objects.
+      ALLOCATE(trunc(nyP))
+      !
+      ! For each j row, set the starting and ending wavenumbers for truncation.
+      jLoop: DO j = 1, nyP
+         !
+         ! Wavenumber in the y direction.
+         ky = REAL(kyP(j), RWPF)
+         iLoop: DO i = 1, cISize
+            !
+            ! Wavenumber in the x direction.
+            kx = REAL(kxP(i), RWPF)
+            !
+            ! Overall wavenumber magnitude.
+            kMag = SQRT(kx**2 + ky**2)
+            !
+            ! Check to see if this wavenumber is beyond the threshold.
+            IF (kMag > kMax + eps) THEN
+               trunc(j)%i1 = i
+               trunc(j)%i2 = cISize
+               EXIT iLoop
+            END IF
+         END DO iLoop
+      END DO jLoop
+   END SUBROUTINE SetupTruncation
 
    !> Initialize the spectral module.
    !!
@@ -356,12 +424,11 @@ CONTAINS
       CALL ComputeVelocity(nxP, nyP, rISize, cISize, kxP, kyP, &
                            uC, uR, vC, vR, psiC, .FALSE.)
       !
-      ! 2. Explicitly truncate higher frequency modes before inversion.
-      !
-      !    NOTE: This is already done for u and v, since Q is explicitly
-      !    truncated at the end of each RK stage.
-      !
       ! 3. Invert the vorticity and velocity components to physical space.
+      !
+      !     NOTE: Proper truncation has already been taken care of for this
+      !     inversion. At the end of each RK stage w and psi are explicitly
+      !     truncated, so u and v are truncated as well.
       !
       CALL TransformC2R(rISize, cISize, nyP, uC, uR)
       CALL TransformC2R(rISize, cISize, nyP, vC, vR)
@@ -386,6 +453,9 @@ CONTAINS
       CALL TransformR2C(nxG, nyG, nyP, rISize, cISize, wR, wC)
       !
       ! 6. Truncate the high wavenumber spectral content from the signal.
+      !
+      CALL Truncate(cISize, nyP, uC)
+      CALL Truncate(cISize, nyP, vC)
       !
       ! 7. Perform differentation of the nonlinear term in spectral space.
       !
@@ -709,6 +779,27 @@ CONTAINS
       ! Perform the forward transform.
       CALL FFTW_MPI_EXECUTE_DFT_C2R(c2rPlan, cData, rData)
    END SUBROUTINE TransformC2R
+
+   !> Subroutine to truncate undesired Fourier modes.
+   !!
+   !> @param[in] cISize Size of the i dimension of complex arrays.
+   !> @param[in] nyP Number of y points on this process.
+   !> @param[in] dataC Complex data array to truncate.
+   SUBROUTINE Truncate(cISize, nyP, dataC)
+      IMPLICIT NONE
+      ! Calling arguments.
+      INTEGER(KIND=IWPF),INTENT(IN) :: cISize, nyP
+      COMPLEX(KIND=CWPC),DIMENSION(cISize,nyP),INTENT(INOUT) :: dataC
+      ! Local variables.
+      ! Looping index for truncation objects.
+      INTEGER(KIND=IWPF) :: j
+
+      ! Loop over each truncation object and zero out the complex numbers for
+      ! the i range it specifies.
+      DO j = 1, nyP
+         dataC(trunc(j)%i1:trunc(j)%i2,j) = (0.0_RWPC, 0.0_RWPC)
+      END DO
+   END SUBROUTINE Truncate
 
    !> Finalize the spectral module.
    SUBROUTINE SpectralFinalize()

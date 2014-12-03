@@ -130,7 +130,7 @@ CONTAINS
    SUBROUTINE IntegrateOneStep(nxG, nyG, nxP, nyP, rISize, cISize, kxP, kyP, &
                                nu, dt, uC, uR, vC, vR, wC, wR, psiC, psiR)
       ! Required modules.
-      USE Spectral_m,ONLY: ComputeRHS, ComputePsi
+      USE Spectral_m,ONLY: ComputeRHS, ComputePsi, Truncate
       IMPLICIT NONE
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: nxG, nyG, nxP, nyP, rISize, cISize
@@ -161,6 +161,10 @@ CONTAINS
       !
       ! Now with vorticity updated, solve for the streamfunction.
       CALL ComputePsi(cISize, nyP, kxP, kyP, wSC, psiSC)
+      !
+      ! Truncate undesired high-wavenumber modes.
+      CALL Truncate(cISize, nyP, wSC)
+      CALL Truncate(cISize, nyP, psiSC)
 
       ! Calculate the RHS using the first intermediate stage.
       dW(:,:) = (0.0_RWPC, 0.0_RWPC)
@@ -178,6 +182,10 @@ CONTAINS
       !
       ! Now with vorticity updated, solve for the streamfunction.
       CALL ComputePsi(cISize, nyP, kxP, kyP, wSC, psiSC)
+      !
+      ! Truncate undesired high-wavenumber modes.
+      CALL Truncate(cISize, nyP, wSC)
+      CALL Truncate(cISize, nyP, psiSC)
 
       ! Calculate the RHS using the second intermediate stage.
       dW(:,:) = (0.0_RWPC, 0.0_RWPC)
@@ -195,6 +203,10 @@ CONTAINS
       !
       ! Now with vorticity updated, solve for the streamfunction.
       CALL ComputePsi(cISize, nyP, kxP, kyP, wC, psiC)
+      !
+      ! Truncate undesired high-wavenumber modes.
+      CALL Truncate(cISize, nyP, wC)
+      CALL Truncate(cISize, nyP, psiC)
    END SUBROUTINE IntegrateOneStep
 
    !> Subroutine to calculate the time step.

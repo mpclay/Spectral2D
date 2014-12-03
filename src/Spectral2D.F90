@@ -35,13 +35,16 @@ PROGRAM Spectral2D_p
    USE MPI
    USE Parameters_m,ONLY: IWPF, RWPF, IWPC, RWPC, CWPC, PI
    USE Alloc_m,ONLY: GetAllocSize, Alloc, Dealloc
-   USE Spectral_m,ONLY: GetGridSize, SetupMask, SetupPlans, SpectralFinalize, &
-                        TransformR2C, TransformC2R, ComputeVelocity, &
-                        NO_DEALIASING, DEALIAS_3_2_RULE, DEALIAS_2_3_RULE
+   USE Analysis_m,ONLY: ComputeSpectrum
+   USE Spectral_m,ONLY: GetGridSize, SetupMask, SetupTruncation, SetupPlans, &
+                        SpectralFinalize, TransformR2C, TransformC2R, &
+                        ComputeVelocity, NO_DEALIASING, DEALIAS_3_2_RULE, &
+                        DEALIAS_2_3_RULE
    USE TimeIntegration_m,ONLY: TimeIntegrationSetup, IntegrateOneStep, &
                                ComputeTimeStep, RK3_TVD_SHU, &
                                TimeIntegrationFinalize
-   USE SetIC_m,ONLY: TAYLOR_GREEN_VORTEX, SetTaylorGreen
+   USE SetIC_m,ONLY: SetTaylorGreen, SetTurbulentVelocity, &
+                     TAYLOR_GREEN_VORTEX, SCHUMANN_VELOCITY_FIELD
    USE IO_m,ONLY: FileName, WriteGridHDF5, WriteRestart, FILE_NAME_LENGTH, &
                   HDF5_OUTPUT
 
@@ -67,16 +70,16 @@ PROGRAM Spectral2D_p
    ! User inputs to the simulation.
    !
    !> Number of grid points in the x direction.
-   INTEGER(KIND=IWPF),PARAMETER :: nx = 16_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: nx = 64_IWPF
    !> Number of grid points in the y direction.
-   INTEGER(KIND=IWPF),PARAMETER :: ny = 16_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: ny = 64_IWPF
    !
    ! Physical parameters and spatial scheme control.
    !
    !> Physical viscosity.
-   REAL(KIND=RWPC),PARAMETER :: nu = 1.0_RWPC
+   REAL(KIND=RWPC),PARAMETER :: nu = 0.001_RWPC
    !> Dealiasing technique.
-   INTEGER(KIND=IWPF),PARAMETER :: dealias = NO_DEALIASING
+   INTEGER(KIND=IWPF),PARAMETER :: dealias = DEALIAS_3_2_RULE
    !
    ! Time integration and simulation ending method.
    !
@@ -88,9 +91,9 @@ PROGRAM Spectral2D_p
    ! Parameters required for constant time stepping.
    !
    !> Number of steps for the simulation.
-   INTEGER(KIND=IWPF),PARAMETER :: stepEnd = 100_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: stepEnd = 10000000_IWPF
    !> Simulation time step.
-   REAL(KIND=RWPC) :: dt = 1.0e-2_RWPC
+   REAL(KIND=RWPC) :: dt = 1.0e-6_RWPC
    !
    ! Parameters required for dynamic time stepping.
    !
@@ -100,14 +103,21 @@ PROGRAM Spectral2D_p
    ! Parameters to determine when data will be written.
    !
    !> Number of steps after which to write a data file.
-   INTEGER(KIND=IWPF),PARAMETER :: writePeriod = 100_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: writePeriod = 10000_IWPF
    !> Number of steps after which to print info to the user.
-   INTEGER(KIND=IWPF),PARAMETER :: printPeriod = 10_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: printPeriod = 1000_IWPF
    !
    ! Parameters to control initial conditions.
    !
    !> Desired initial conditions.
-   INTEGER(KIND=IWPF),PARAMETER :: ics = TAYLOR_GREEN_VORTEX
+   INTEGER(KIND=IWPF),PARAMETER :: ics = SCHUMANN_VELOCITY_FIELD
+   !
+   ! Additional parameters required for turbulent initialization.
+   !
+   !> Desired peak wavenumber in the spectrum.
+   REAL(KIND=RWPF),PARAMETER :: k0 = 4.0_RWPF
+   !> RMS velocity intensity.
+   REAL(KIND=RWPF),PARAMETER :: urms = 1.0_RWPF
 
    ! MPI related variables.
    !
@@ -142,6 +152,8 @@ PROGRAM Spectral2D_p
    INTEGER(KIND=IWPF) :: kxMU
    !> Maximum y wavenumber actually being used.
    INTEGER(KIND=IWPF) :: kyMU
+   !> Maximum wavenumber magnitude allowed before truncation.
+   REAL(KIND=RWPF) :: kMax
    !> Array of wavenumbers in the x direction.
    INTEGER(KIND=IWPF),DIMENSION(:),ALLOCATABLE :: kxG
    !> Array of wavenumbers in the y direction.
@@ -242,7 +254,7 @@ PROGRAM Spectral2D_p
    CALL GetGridSize(nx, ny, dealias, nxG, nyG, &
                     kxLG, kyLG, kxMG, kyMG, &
                     kxLU, kyLU, kxMU, kyMU, &
-                    rISize, cISize, kxG, kyG)
+                    kMax, rISize, cISize, kxG, kyG)
 
    ! Get the allocation sizes as determined by the MPI FFTW routines.
    CALL GetAllocSize(nxG, nyG, kxG, kyG, kxMU, cISize, nxP, nyP, j1, j2, &
@@ -250,6 +262,9 @@ PROGRAM Spectral2D_p
 
    ! Set up masked wavenumbers for differentiation.
    CALL SetupMask(cISize, nyP, kxP, kyP, kxMG, kyMG)
+
+   ! Set up wavenumber truncation bounds.
+   CALL SetupTruncation(cISize, nyP, kMax, kxP, kyP)
 
    ! Write out the grid.
    CALL FileName('GRID', 'h5', fname)
@@ -287,6 +302,10 @@ PROGRAM Spectral2D_p
       CASE (TAYLOR_GREEN_VORTEX)
          CALL SetTaylorGreen(nxG, nyG, nxP, nyP, j1, j2, rISize, cISize, &
                              wC, wR, psiC, psiR)
+      CASE (SCHUMANN_VELOCITY_FIELD)
+         CALL SetTurbulentVelocity(rank, nxG, nyG, nxP, nyP, rISize, cISize, &
+                                   kxP, kyP, kxLG, kyLG, kxMG, kyMG, k0, urms, &
+                                   uC, vC, wC, psiC)
       CASE DEFAULT
    END SELECT
    !
@@ -294,6 +313,13 @@ PROGRAM Spectral2D_p
    CALL WriteRestart(nxG, nyG, nxP, nyP, 1_IWPF, nxP, j1, j2, &
                      rISize, cISize, kxP, kyP, rank, nadv, time, nu, &
                      HDF5_OUTPUT, uC, uR, vC, vR, wC, wR, psiC, psiR)
+   !
+   ! Also write out the initial energy spectrum.
+   CALL ComputeVelocity(nxP, nyP, rISize, cISize, kxP, kyP, &
+                        uC, uR, vC, vR, PsiC, .FALSE.)
+   CALL ComputeSpectrum(rank, nxG, nyG, nxP, nyP, rISize, cISize, &
+                        kxP, kyP, kxLG, kyLG, kxMG, kyMG, .TRUE., &
+                        0, uC, vC)
 
    ! Enter the main time stepping loop.
    loopBool = .TRUE.
@@ -351,9 +377,18 @@ PROGRAM Spectral2D_p
       IF (writeBool .OR. exitThisStep) THEN
          writeStep = writeStep + writePeriod
          writeBool = .FALSE.
+         !
+         ! Write out the restart file in HDF5 format.
          CALL WriteRestart(nxG, nyG, nxP, nyP, 1_IWPF, nxP, j1, j2, &
                            rISize, cISize, kxP, kyP, rank, nadv, time, nu, &
                            HDF5_OUTPUT, uC, uR, vC, vR, wC, wR, psiC, psiR)
+         !
+         ! Also write out the energy spectrum when a restart file is saved.
+         CALL ComputeVelocity(nxP, nyP, rISize, cISize, kxP, kyP, &
+                              uC, uR, vC, vR, PsiC, .FALSE.)
+         CALL ComputeSpectrum(rank, nxG, nyG, nxP, nyP, rISize, cISize, &
+                              kxP, kyP, kxLG, kyLG, kxMG, kyMG, .TRUE., &
+                              nadv, uC, vC)
       ELSE
          IF (nadv + 1_IWPF == writeStep) THEN
             writeBool = .TRUE.

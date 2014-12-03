@@ -25,8 +25,7 @@ MODULE Analysis_m
    IMPLICIT NONE
 
    ! Module procedures.
-   PUBLIC :: ComputeSpectrum
-   PRIVATE :: BinarySearch
+   PUBLIC :: ComputeSpectrum, BinarySearch
 
 CONTAINS
 
@@ -39,24 +38,29 @@ CONTAINS
    !> @param[in] nyP Number of grid points in the y direction on this process.
    !> @param[in] rISize Size of real data in the i direction.
    !> @param[in] cISize Size of complex data in the i direction.
+   !> @param[in] kxP Array of wavenumbers in the x direction on this process.
+   !> @param[in] kyP Array of wavenumbers in the y direction on this process.
    !> @param[in] kxLG Lowest x wavenumber in the total simulation.
    !> @param[in] kyLG Lowest y wavenumber in the total simulation.
    !> @param[in] kxMG Maximum x wavenumber in the total simulation.
    !> @param[in] kyMG Maximum y wavenumber in the total simulation.
-   !> @param[in] kxP Array of wavenumbers in the x direction on this process.
-   !> @param[in] kyP Array of wavenumbers in the y direction on this process.
+   !> @param[in] output Whether or not to write the spectrum to file.
+   !> @param[in] outNum Number for the output spectrum.
    !> @param[in,out] uC Complex cast of u velocity array.
    !> @param[in,out] vC Complex cast of v velocity array.
    SUBROUTINE ComputeSpectrum(rank, nxG, nyG, nxP, nyP, rISize, cISize, &
-                              kxP, kyP, kxLG, kyLG, kxMG, kyMG, uC, vC)
+                              kxP, kyP, kxLG, kyLG, kxMG, kyMG, output, &
+                              outNum, uC, vC)
       ! Required modules.
       USE MPI
+      USE IO_m,ONLY: FILE_NAME_LENGTH, FileName
       IMPLICIT NONE
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: rank, nxG, nyG, nxP, nyP, rISize, cISize
       INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxP
       INTEGER(KIND=IWPF),DIMENSION(nyP),INTENT(IN) :: kyP
-      INTEGER(KIND=IWPF),INTENT(IN) :: kxLG, kyLG, kxMG, kyMG
+      INTEGER(KIND=IWPF),INTENT(IN) :: kxLG, kyLG, kxMG, kyMG, outNum
+      LOGICAL,INTENT(IN) :: output
       COMPLEX(KIND=CWPC),DIMENSION(cISize,nyP),INTENT(INOUT) :: uC, vC
       ! Local variables.
       ! Maximum wavenumber in the simulation.
@@ -91,6 +95,10 @@ CONTAINS
       REAL(KIND=RWPF) :: kMag
       ! Twice the energy content of a Fourier mode.
       REAL(KIND=RWPF) :: Ehat
+      ! Number to increase bin count by for a given mode.
+      INTEGER(KIND=IWPF) :: cnt
+      ! File name for the spectrum if it is being saved.
+      CHARACTER(LEN=FILE_NAME_LENGTH) :: fname
       ! Looping indices.
       INTEGER(KIND=IWPF) :: i, j
       ! Error handling.
@@ -162,12 +170,14 @@ CONTAINS
             ! contribution to take into account the modes not stored in memory.
             IF ((kxI == 0_IWPF) .OR. (kxI == kxMg)) THEN
                EkBinL(indx) = EkBinL(indx) + 0.5_RWPF*Ehat
+               cnt = 1_IWPF
             ELSE
                EkBinL(indx) = EkBinL(indx) + Ehat
+               cnt = 2_IWPF
             END IF
             !
             ! Increase the bin counter for this bin.
-            binCntL(indx) = binCntL(indx) + 1_IWPF
+            binCntL(indx) = binCntL(indx) + cnt
          END DO
       END DO
 
@@ -190,6 +200,17 @@ CONTAINS
             ! The energy spectrum must be normalized by the bin width.
             EkBinG(i) = EkBinG(i)/dk
          END DO
+         !
+         ! Save the spectrum to file if instructed to do so.
+         IF (output) THEN
+            CALL FileName('Spectrum', outNum, 'dat', fname)
+            OPEN(UNIT=10,FILE=fname,STATUS='REPLACE',FORM='FORMATTED')
+            DO i = 1, numBin
+               WRITE(10,100) kBin(i), EkBinG(i)
+               100 FORMAT (I6.6,ES15.8)
+            END DO
+            CLOSE(UNIT=10)
+         END IF
       END IF
 
       ! Free temporary memory.
