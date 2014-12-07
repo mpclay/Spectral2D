@@ -127,7 +127,6 @@ CONTAINS
                                    uC, vC, wC, psiC)
       ! Required modules.
       USE Spectral_m,ONLY: ComputeVorticity, ComputePsi
-      USE Analysis_m,ONLY: ComputeSpectrum
       USE Random_m,ONLY: InitRandomSeed
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: rank, nxG, nyG, nxP, nyP, rISize, cISize
@@ -143,10 +142,6 @@ CONTAINS
       ! Initialize the Fourier velocity field.
       CALL FourierVelocity(rank, nxG, nyG, nxP, nyP, rISize, cISize, &
                            kxP, kyP, kxLG, kyLG, kxMG, kyMG, k0, urms, uC, vC)
-
-      ! Calculate the initial energy spectrum.
-      CALL ComputeSpectrum(rank, nxG, nyG, nxP, nyP, rISize, cISize, &
-                           kxP, kyP, kxLG, kyLG, kxMG, kyMG, .TRUE., 0, uC, vC)
 
       ! Calculate the vorticity from the velocity field.
       CALL ComputeVorticity(nxP, nyP, cISize, kxP, kyP, uC, vC, wC)

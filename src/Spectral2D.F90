@@ -35,7 +35,7 @@ PROGRAM Spectral2D_p
    USE MPI
    USE Parameters_m,ONLY: IWPF, RWPF, IWPC, RWPC, CWPC, PI
    USE Alloc_m,ONLY: GetAllocSize, Alloc, Dealloc
-   USE Analysis_m,ONLY: ComputeSpectrum
+   USE Analysis_m,ONLY: SetupAnalysis, Analysis
    USE Spectral_m,ONLY: GetGridSize, SetupMask, SetupTruncation, SetupPlans, &
                         SpectralFinalize, TransformR2C, TransformC2R, &
                         ComputeVelocity, NO_DEALIASING, DEALIAS_3_2_RULE, &
@@ -70,14 +70,14 @@ PROGRAM Spectral2D_p
    ! User inputs to the simulation.
    !
    !> Number of grid points in the x direction.
-   INTEGER(KIND=IWPF),PARAMETER :: nx = 64_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: nx = 96_IWPF
    !> Number of grid points in the y direction.
-   INTEGER(KIND=IWPF),PARAMETER :: ny = 64_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: ny = 96_IWPF
    !
    ! Physical parameters and spatial scheme control.
    !
    !> Physical viscosity.
-   REAL(KIND=RWPC),PARAMETER :: nu = 0.001_RWPC
+   REAL(KIND=RWPC),PARAMETER :: nu = 0.005_RWPC
    !> Dealiasing technique.
    INTEGER(KIND=IWPF),PARAMETER :: dealias = DEALIAS_3_2_RULE
    !
@@ -91,9 +91,9 @@ PROGRAM Spectral2D_p
    ! Parameters required for constant time stepping.
    !
    !> Number of steps for the simulation.
-   INTEGER(KIND=IWPF),PARAMETER :: stepEnd = 10000000_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: stepEnd = 2000000_IWPF
    !> Simulation time step.
-   REAL(KIND=RWPC) :: dt = 1.0e-6_RWPC
+   REAL(KIND=RWPC) :: dt = 1.0e-5_RWPC
    !
    ! Parameters required for dynamic time stepping.
    !
@@ -104,8 +104,10 @@ PROGRAM Spectral2D_p
    !
    !> Number of steps after which to write a data file.
    INTEGER(KIND=IWPF),PARAMETER :: writePeriod = 10000_IWPF
+   !> Number of steps after which to write out Eulerian statistics.
+   INTEGER(KIND=IWPF),PARAMETER :: statPeriod = 1000_IWPF
    !> Number of steps after which to print info to the user.
-   INTEGER(KIND=IWPF),PARAMETER :: printPeriod = 1000_IWPF
+   INTEGER(KIND=IWPF),PARAMETER :: printPeriod = 10_IWPF
    !
    ! Parameters to control initial conditions.
    !
@@ -115,9 +117,14 @@ PROGRAM Spectral2D_p
    ! Additional parameters required for turbulent initialization.
    !
    !> Desired peak wavenumber in the spectrum.
-   REAL(KIND=RWPF),PARAMETER :: k0 = 4.0_RWPF
+   REAL(KIND=RWPF),PARAMETER :: k0 = 1.5_RWPF
    !> RMS velocity intensity.
    REAL(KIND=RWPF),PARAMETER :: urms = 1.0_RWPF
+   !
+   ! Anything related to IO.
+   !
+   !> Root name for Eulerian statistics output file.
+   CHARACTER(LEN=FILE_NAME_LENGTH),PARAMETER :: statRoot = 'EULERIAN'
 
    ! MPI related variables.
    !
@@ -232,10 +239,12 @@ PROGRAM Spectral2D_p
    INTEGER(KIND=IWPF) :: ierr
    !> Logic to check when we exit time stepping.
    LOGICAL :: loopBool, exitThisStep
-   !> Logic to determine when to write data and print info to the user.
-   LOGICAL :: printBool, writeBool
+   !> Logic to determine when to write data, collect stats, and print info.
+   LOGICAL :: writeBool, statBool, printBool
    !> Number of steps after which a data file will be written.
    INTEGER(KIND=IWPF) :: writeStep = writePeriod
+   !> Number of steps after which statistics will be collected.
+   INTEGER(KIND=IWPF) :: statStep = statPeriod
    !> Number of steps after which information will be printed to the user.
    INTEGER(KIND=IWPF) :: printStep = printPeriod
    !> Buffer for output file names.
@@ -313,18 +322,18 @@ PROGRAM Spectral2D_p
    CALL WriteRestart(nxG, nyG, nxP, nyP, 1_IWPF, nxP, j1, j2, &
                      rISize, cISize, kxP, kyP, rank, nadv, time, nu, &
                      HDF5_OUTPUT, uC, uR, vC, vR, wC, wR, psiC, psiR)
-   !
-   ! Also write out the initial energy spectrum.
-   CALL ComputeVelocity(nxP, nyP, rISize, cISize, kxP, kyP, &
-                        uC, uR, vC, vR, PsiC, .FALSE.)
-   CALL ComputeSpectrum(rank, nxG, nyG, nxP, nyP, rISize, cISize, &
-                        kxP, kyP, kxLG, kyLG, kxMG, kyMG, .TRUE., &
-                        0, uC, vC)
+
+   ! Set up the data analysis module and write out data from initial conditions.
+   CALL SetupAnalysis(statRoot)
+   CALL Analysis(rank, nadv, time, nu, nxG, nyG, nxP, nyP, &
+                 rISize, cISize, kxP, kyP, kxLG, kyLG, kxMG, kyMG, &
+                 uC, uR, vC, vR, wC, wR, psiC, psiR)
 
    ! Enter the main time stepping loop.
    loopBool = .TRUE.
    exitThisStep = .FALSE.
    writeBool = .FALSE.
+   statBool = .FALSE.
    printBool = .FALSE.
    tloop: DO WHILE (loopBool)
       ! Increment the vorticity and streamfunction arrays by one time step.
@@ -382,16 +391,24 @@ PROGRAM Spectral2D_p
          CALL WriteRestart(nxG, nyG, nxP, nyP, 1_IWPF, nxP, j1, j2, &
                            rISize, cISize, kxP, kyP, rank, nadv, time, nu, &
                            HDF5_OUTPUT, uC, uR, vC, vR, wC, wR, psiC, psiR)
-         !
-         ! Also write out the energy spectrum when a restart file is saved.
-         CALL ComputeVelocity(nxP, nyP, rISize, cISize, kxP, kyP, &
-                              uC, uR, vC, vR, PsiC, .FALSE.)
-         CALL ComputeSpectrum(rank, nxG, nyG, nxP, nyP, rISize, cISize, &
-                              kxP, kyP, kxLG, kyLG, kxMG, kyMG, .TRUE., &
-                              nadv, uC, vC)
       ELSE
          IF (nadv + 1_IWPF == writeStep) THEN
             writeBool = .TRUE.
+         END IF
+      END IF
+
+      ! Check whether or not we will write out statistics.
+      IF (statBool .OR. exitThisStep) THEN
+         statStep = statStep + statPeriod
+         statBool = .FALSE.
+         !
+         ! Write out Eulerian statistics.
+         CALL Analysis(rank, nadv, time, nu, nxG, nyG, nxP, nyP, &
+                       rISize, cISize, kxP, kyP, kxLG, kyLG, kxMG, kyMG, &
+                       uC, uR, vC, vR, wC, wR, psiC, psiR)
+      ELSE
+         IF (nadv + 1_IWPF == statStep) THEN
+            statBool = .TRUE.
          END IF
       END IF
 

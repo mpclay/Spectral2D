@@ -680,7 +680,7 @@ CONTAINS
 
       ! Form the output file name.
       WRITE(fname,10) TRIM(root), '_', num, '.', TRIM(suffix)
-      10 FORMAT (A,A,I6.6,A,A)
+      10 FORMAT (A,A,I8.8,A,A)
    END SUBROUTINE FileNameWithNum
 
 END MODULE IO_m

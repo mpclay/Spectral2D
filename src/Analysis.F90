@@ -21,17 +21,230 @@ MODULE Analysis_m
 
    ! Required modules.
    USE Parameters_m,ONLY: IWPC, IWPF, RWPC, RWPF, CWPC
+   USE IO_m,ONLY: FILE_NAME_LENGTH
 
    IMPLICIT NONE
 
+   !> Name of the time-series data analysis output file.
+   CHARACTER(LEN=FILE_NAME_LENGTH),PRIVATE :: eulOut
+
    ! Module procedures.
-   PUBLIC :: ComputeSpectrum, BinarySearch
+   PUBLIC :: SetupAnalysis, Analysis, ComputeSpectrum, BinarySearch
 
 CONTAINS
+
+   !> Procedure to set up the data analysis module.
+   !!
+   !> @param[in] fRoot Desired root name for the Eulerian statistics file.
+   SUBROUTINE SetupAnalysis(fRoot)
+      ! Required modules.
+      USE IO_m,ONLY: FileName
+      IMPLICIT NONE
+      ! Calling arguments.
+      CHARACTER(LEN=*),INTENT(IN) :: fRoot
+
+      ! Form the Eulerian file name.
+      CALL FileName(fRoot, 'DAT', eulOut)
+
+      ! Open the Eulerian statistics file and write the header.
+      OPEN(UNIT=100,FILE=eulOut,STATUS='REPLACE',ACTION='WRITE', &
+           FORM='FORMATTED')
+      WRITE(100,200) '#', 'NADV', 'TIME', 'TKE', 'EPS', 'EnstDiss', &
+                     'xSkew', 'ySkew'
+      200 FORMAT (A,T3,A,T17,A,T33,A,T49,A,T65,A,T81,A,T97,A)
+      !
+      ! Close out the file.
+      CLOSE(UNIT=100)
+   END SUBROUTINE SetupAnalysis
+
+   !> Procedure to perform data analysis during simulations.
+   !!
+   !! This routine will calculate the two-dimensional skewness factors for the
+   !! x and y directions, the total turbulent kinetic energy, the enstrophy
+   !! dissipation rate, and the energy/enstrophy dissipation spectra.
+   !!
+   !> @param[in] rank MPI rank of this process.
+   !> @param[in] nadv Current simulation step.
+   !> @param[in] time Current simulation time.
+   !> @param[in] nu Physical viscosity.
+   !> @param[in] nxG Total number of grid points in the x direction.
+   !> @param[in] nyG Total number of grid points in the y direction.
+   !> @param[in] nxP Number of grid points in the x direction on this process.
+   !> @param[in] nyP Number of grid points in the y direction on this process.
+   !> @param[in] rISize Size of real data in the i direction.
+   !> @param[in] cISize Size of complex data in the i direction.
+   !> @param[in] kxP Array of wavenumbers in the x direction on this process.
+   !> @param[in] kyP Array of wavenumbers in the y direction on this process.
+   !> @param[in] kxLG Lowest x wavenumber in the total simulation.
+   !> @param[in] kyLG Lowest y wavenumber in the total simulation.
+   !> @param[in] kxMG Maximum x wavenumber in the total simulation.
+   !> @param[in] kyMG Maximum y wavenumber in the total simulation.
+   !> @param[in,out] uC Complex cast of u velocity array.
+   !> @param[in,out] uR Real cast of the u velocity array.
+   !> @param[in,out] vC Complex cast of v velocity array.
+   !> @param[in,out] vR Real cast of the v velocity array.
+   !> @param[in,out] wC Complex cast of the vorticity field.
+   !> @param[in,out] wR Real cast of the vorticity field.
+   !> @param[in,out] psiC Complex cast of the streamfunction.
+   !> @param[in,out] psiR Real cast of the streamfunction.
+   SUBROUTINE Analysis(rank, nadv, time, nu, nxG, nyG, nxP, nyP, &
+                       rISize, cISize, kxP, kyP, kxLG, kyLG, kxMG, kyMG, &
+                       uC, uR, vC, vR, wC, wR, psiC, psiR)
+      ! Required modules.
+      USE ISO_FORTRAN_ENV,ONLY: OUTPUT_UNIT
+      USE MPI
+      USE Spectral_m,ONLY: ComputeVelocity, DuDx, DuDy, &
+                           TransformR2C, TransformC2R
+      IMPLICIT NONE
+      ! Calling arguments.
+      INTEGER(KIND=IWPF),INTENT(IN) :: rank, nadv, nxG, nyG, nxP, nyP
+      INTEGER(KIND=IWPF),INTENT(IN) :: rISize, cISize
+      REAL(KIND=RWPF),INTENT(IN) :: time, nu
+      INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxP
+      INTEGER(KIND=IWPF),DIMENSION(nyP),INTENT(IN) :: kyP
+      INTEGER(KIND=IWPF),INTENT(IN) :: kxLG, kyLG, kxMG, kyMG
+      COMPLEX(KIND=CWPC),DIMENSION(cISize,nyP),INTENT(INOUT) :: uC, vC, wC, psiC
+      REAL(KIND=RWPC),DIMENSION(rISize,nyP),INTENT(INOUT) :: uR, vR, wR, psiR
+      ! Local variables.
+      ! Send/receive buffers for calculating skewness.
+      REAL(KIND=RWPC),DIMENSION(3) :: sBuff, rBuff
+      ! Skewness calculated in the x direction.
+      REAL(KIND=RWPC) :: xSkew
+      ! Skewness calculated in the y direction.
+      REAL(KIND=RWPC) :: ySkew
+      ! Normalization factor for averaging.
+      REAL(KIND=RWPC) :: fact
+      ! Total turbulent kinetic energy.
+      REAL(KIND=RWPF) :: tke
+      ! Mean dissipation rate.
+      REAL(KIND=RWPF) :: eps
+      ! Mean enstrophy dissipation rate.
+      REAL(KIND=RWPF) :: enstDiss
+      ! Looping indices.
+      INTEGER(KIND=IWPF) :: i, j
+      ! Error handling.
+      INTEGER(KIND=IWPF) :: ierr
+
+      ! Inform the user that Eulerian stats are being collected.
+      IF (rank == 0_IWPF) THEN
+         WRITE(OUTPUT_UNIT,100) 'Writing Eulerian statistics at t = ', time, &
+                                ' and nadv = ', nadv
+         100 FORMAT (A,ES15.8,A,I8.8)
+      END IF
+
+      ! Calculate the skewness factor for the x direction.
+      !
+      ! NOTE: while doing this, the v velocity array is used as a scratch array
+      ! for the x derivative of vorticity.
+      !
+      ! 1. Calculate the velocity in Fourier space. NOTE: this is currently
+      !    inefficient, since the v velocity is not being used here.
+      CALL ComputeVelocity(nxP, nyP, rISize, cISize, kxP, kyP, &
+                           uC, uR, vC, vR, PsiC, .FALSE.)
+      !
+      ! 2. Differentiate the u velocity and vorticity with respect to x. NOTE:
+      !    after this step, dw/dx is stored in the v velocity array!
+      CALL DuDx(cISize, nyP, kxP, kyP, uC, uC)
+      CALL DuDx(cISize, nyP, kxP, kyP, wC, vC)
+      !
+      ! 3. Transform the signals to physical space.
+      CALL TransformC2R(rISize, cISize, nyP, uC, uR)
+      CALL TransformC2R(rISize, cISize, nyP, vC, vR)
+      !
+      ! 4. Form the summations required for the skewness with the data on this
+      !    process.
+      sBuff(:) = 0.0_RWPC
+      DO j = 1, nyP
+         DO i = 1, nxP
+            sBuff(1) = sBuff(1) + uR(i,j)*vR(i,j)**2
+            sBuff(2) = sBuff(2) + uR(i,j)**2
+            sBuff(3) = sBuff(3) + vR(i,j)**2
+         END DO
+      END DO
+      !
+      ! 5. Reduce all summations to the root process.
+      CALL MPI_REDUCE(sBuff, rBuff, 3, MPI_DOUBLE, MPI_SUM, 0, &
+                      MPI_COMM_WORLD, ierr)
+      !
+      ! 6. The root process performs the final averaging for the skewness.
+      IF (rank == 0_IWPF) THEN
+         ! Average each of the summations.
+         fact = REAL(nxG, RWPC)*REAL(nyG, RWPC)
+         rBuff(1) = rBuff(1)/fact
+         rBuff(2) = rBuff(2)/fact
+         rBuff(3) = rBuff(3)/fact
+         !
+         ! Form the x direction skewness.
+         xSkew = -2.0_RWPC*rBuff(1)/(SQRT(rBuff(2))*rBuff(3))
+      END IF
+
+      ! Calculate the skewness factor for the y direction.
+      !
+      ! NOTE: while doing this, the u velocity array is used as a scratch array
+      ! for the y derivative of vorticity.
+      !
+      ! 1. Calculate the velocity in Fourier space. NOTE: this is currently
+      !    inefficient, since the u velocity is not being used here.
+      CALL ComputeVelocity(nxP, nyP, rISize, cISize, kxP, kyP, &
+                           uC, uR, vC, vR, PsiC, .FALSE.)
+      !
+      ! 2. Differentiate the v velocity and vorticity with respect to y. NOTE:
+      !    after this step, dw/dy is stored in the u velocity array!
+      CALL DuDy(cISize, nyP, kxP, kyP, vC, vC)
+      CALL DuDy(cISize, nyP, kxP, kyP, wC, uC)
+      !
+      ! 3. Transform the signals to physical space.
+      CALL TransformC2R(rISize, cISize, nyP, vC, vR)
+      CALL TransformC2R(rISize, cISize, nyP, uC, uR)
+      !
+      ! 4. Form the summations required for the skewness with the data on this
+      !    process.
+      sBuff(:) = 0.0_RWPC
+      DO j = 1, nyP
+         DO i = 1, nxP
+            sBuff(1) = sBuff(1) + vR(i,j)*uR(i,j)**2
+            sBuff(2) = sBuff(2) + vR(i,j)**2
+            sBuff(3) = sBuff(3) + uR(i,j)**2
+         END DO
+      END DO
+      !
+      ! 6. Reduce all summations to the root process.
+      CALL MPI_REDUCE(sBuff, rBuff, 3, MPI_DOUBLE, MPI_SUM, 0, &
+                      MPI_COMM_WORLD, ierr)
+      !
+      ! 7. The root process performs the final averaging for the skewness.
+      IF (rank == 0_IWPF) THEN
+         ! Average each of the summations.
+         fact = REAL(nxG, RWPC)*REAL(nyG, RWPC)
+         rBuff(1) = rBuff(1)/fact
+         rBuff(2) = rBuff(2)/fact
+         rBuff(3) = rBuff(3)/fact
+         !
+         ! Form the y direction skewness.
+         ySkew = -2.0_RWPC*rBuff(1)/(SQRT(rBuff(2))*rBuff(3))
+      END IF
+
+      ! Calculate the energy, dissipation, and enstrophy dissipation spectra.
+      !
+      ! NOTE: we also get the total TKE and enstrophy dissipation from this.
+      CALL ComputeVelocity(nxP, nyP, rISize, cISize, kxP, kyP, &
+                           uC, uR, vC, vR, PsiC, .FALSE.)
+      CALL ComputeSpectrum(rank, nu, nxG, nyG, nxP, nyP, rISize, cISize, &
+                           kxP, kyP, kxLG, kyLG, kxMG, kyMG, .TRUE., &
+                           nadv, uC, vC, tke, eps, enstDiss)
+
+      ! Write out the data to file.
+      OPEN(UNIT=100,FILE=eulOut,STATUS='OLD',ACTION='WRITE', &
+           FORM='FORMATTED',ACCESS='APPEND')
+      WRITE(100,150) nadv, time, tke, eps, enstDiss, xSkew, ySkew
+      150 FORMAT (I12.10,6ES16.8)
+      CLOSE(UNIT=100)
+   END SUBROUTINE Analysis
 
    !> Procedure to compute the energy spectrum.
    !!
    !> @param[in] rank MPI rank of this process.
+   !> @param[in] nu Physical viscosity of the fluid.
    !> @param[in] nxG Total number of grid points in the x direction.
    !> @param[in] nyG Total number of grid points in the y direction.
    !> @param[in] nxP Number of grid points in the x direction on this process.
@@ -48,20 +261,25 @@ CONTAINS
    !> @param[in] outNum Number for the output spectrum.
    !> @param[in,out] uC Complex cast of u velocity array.
    !> @param[in,out] vC Complex cast of v velocity array.
-   SUBROUTINE ComputeSpectrum(rank, nxG, nyG, nxP, nyP, rISize, cISize, &
+   !> @param[out] tke Total turbulent kinetic energy. Only for root process.
+   !> @param[out] eps Dissipation rate. Only for root process.
+   !> @param[out] enstDiss Enstrophy dissipation rate. Only for root process.
+   SUBROUTINE ComputeSpectrum(rank, nu, nxG, nyG, nxP, nyP, rISize, cISize, &
                               kxP, kyP, kxLG, kyLG, kxMG, kyMG, output, &
-                              outNum, uC, vC)
+                              outNum, uC, vC, tke, eps, enstDiss)
       ! Required modules.
       USE MPI
       USE IO_m,ONLY: FILE_NAME_LENGTH, FileName
       IMPLICIT NONE
       ! Calling arguments.
       INTEGER(KIND=IWPF),INTENT(IN) :: rank, nxG, nyG, nxP, nyP, rISize, cISize
+      REAL(KIND=RWPF),INTENT(IN) :: nu
       INTEGER(KIND=IWPF),DIMENSION(cISize),INTENT(IN) :: kxP
       INTEGER(KIND=IWPF),DIMENSION(nyP),INTENT(IN) :: kyP
       INTEGER(KIND=IWPF),INTENT(IN) :: kxLG, kyLG, kxMG, kyMG, outNum
       LOGICAL,INTENT(IN) :: output
       COMPLEX(KIND=CWPC),DIMENSION(cISize,nyP),INTENT(INOUT) :: uC, vC
+      REAL(KIND=RWPF),INTENT(OUT) :: tke, eps, enstDiss
       ! Local variables.
       ! Maximum wavenumber in the simulation.
       REAL(KIND=RWPF) :: kMax
@@ -203,14 +421,31 @@ CONTAINS
          !
          ! Save the spectrum to file if instructed to do so.
          IF (output) THEN
-            CALL FileName('Spectrum', outNum, 'dat', fname)
+            CALL FileName('SPECTRUM', outNum, 'DAT', fname)
             OPEN(UNIT=10,FILE=fname,STATUS='REPLACE',FORM='FORMATTED')
+            WRITE(10,50) '#', 'k', 'E(k)', 'D(k)', 'DEnst(k)'
             DO i = 1, numBin
-               WRITE(10,100) kBin(i), EkBinG(i)
-               100 FORMAT (I6.6,ES15.8)
+               WRITE(10,100) kBin(i), EkBinG(i), &
+                             REAL(kBin(i), RWPF)**2*EkBinG(i), &
+                             REAL(kBin(i), RWPF)**4*EkBinG(i)
             END DO
+            50 FORMAT (A,T3,A,T11,A,T28,A,T45,A)
+            100 FORMAT (I6.6,ES16.8,1X,ES16.8,1X,ES16.8)
             CLOSE(UNIT=10)
          END IF
+         !
+         ! Root process calculates the tke, dissipation rate, and the enstrophy
+         ! dissipation rate.
+         tke = 0.0_RWPF
+         eps = 0.0_RWPF
+         enstDiss = 0.0_RWPF
+         DO i = 1, numBin
+            tke = tke + EkBinG(i)*dk
+            eps = eps + REAL(kBin(i), RWPF)**2*EkBinG(i)*dk
+            enstDiss = enstDiss + REAL(kBin(i), RWPF)**4*EkBinG(i)*dk
+         END DO
+         eps = 2.0_RWPF*nu*eps
+         enstDiss = 2.0_RWPF*nu*enstDiss
       END IF
 
       ! Free temporary memory.
