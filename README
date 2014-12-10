@@ -1,0 +1,51 @@
+Spectral2D
+==========
+
+A 2D pseudo-spectral code to solve the incompressible Navier-Stokes equations in
+vorticity-streamfunction formulation.
+
+Required Software and Environment Variables
+===========================================
+- You must have the MPI and Fortran-enabled version of FFTW installed (v3.3.3
+  was used when writing this code).
+- You must have the environment variable FFTW_ROOT set to the root directory of
+  the FFTW installation. For example, if your FFTW libraries and header files
+  are installed in /usr/lib and /usr/include, set FFTW_ROOT to /usr. In bash,
+  placing "export FFTW_ROOT=/usr" in your .bashrc will work.
+- You must have the parallel and Fortran-enabled HDF5 library installed (v1.8.14
+  was used when writing this code).
+- You must have the environment variable HDF5_ROOT set to the root directory of
+  the HDF5 installation.
+- Export the HDF5 library directory to the LD_LIBRARY_PATH environment variable.
+  In bash: "export LD_LIBRARY_PATH=${HDF5_ROOT}/lib:$LD_LIBRARY_PATH" will work.
+- After installing HDF5 with cmake, you must place the FindHDF5.cmake file in
+  the cmake/modules/FindHDF5.cmake, which is in the root project directory.
+
+Simulation Options
+==================
+
+Right now an input file to the code is not available. The user-defined inputs
+are clearly marked with explanations in Spectral2D.F90, and can be adjusted to
+run different simulations.
+
+Installation
+============
+1. Change to the main source directory:
+    $ cd /path/to/Spectral2D
+2. Make a build directory and go into it:
+    $ mkdir build
+    $ cd build
+3. Enter the cmake curses GUI and press c to configure cmake:
+    $ ccmake ..
+    $ [in cmake curses GUI] c
+4. Enter the installation prefix (note: this can run from build if you wish):
+    $ [in cmake curses GUI] CMAKE_INSTALL_PREFIX=/path/to/installation
+5. Configure your changes in cmake:
+    $ [in cmake curses GUI] c
+6. Generate the Makefile and exit the cmake curses GUI.
+    $ [in cmake curses GUI] g
+7. Make the program.
+    $ make
+8. Install the program.
+    $ make install
+
