@@ -138,23 +138,23 @@ for i in range(nRest):
 L2Order = np.zeros((nRest,4), dtype=np.float64)
 LInfOrder = np.zeros((nRest,4), dtype=np.float64)
 for i in range(1,nRest):
-    dtDiff = np.log(dt[i-1] - dt[i])
+    dtDiff = np.log(dt[i-1]) - np.log(dt[i])
     #
     # L2 errors.
-    psiL2Diff = np.log(L2Err[i-1,0] - L2Err[i,0])
-    wL2Diff = np.log(L2Err[i-1,1] - L2Err[i,1])
-    uL2Diff = np.log(L2Err[i-1,2] - L2Err[i,2])
-    vL2Diff = np.log(L2Err[i-1,3] - L2Err[i,3])
+    psiL2Diff = np.log(L2Err[i-1,0]) - np.log(L2Err[i,0])
+    wL2Diff = np.log(L2Err[i-1,1]) - np.log(L2Err[i,1])
+    uL2Diff = np.log(L2Err[i-1,2]) - np.log(L2Err[i,2])
+    vL2Diff = np.log(L2Err[i-1,3]) - np.log(L2Err[i,3])
     L2Order[i,0] = psiL2Diff/dtDiff
     L2Order[i,1] = wL2Diff/dtDiff
     L2Order[i,2] = uL2Diff/dtDiff
     L2Order[i,3] = vL2Diff/dtDiff
     #
     # LInf errors
-    psiLInfDiff = np.log(LInfErr[i-1,0] - LInfErr[i,0])
-    wLInfDiff = np.log(LInfErr[i-1,1] - LInfErr[i,1])
-    uLInfDiff = np.log(LInfErr[i-1,2] - LInfErr[i,2])
-    vLInfDiff = np.log(LInfErr[i-1,3] - LInfErr[i,3])
+    psiLInfDiff = np.log(LInfErr[i-1,0]) - np.log(LInfErr[i,0])
+    wLInfDiff = np.log(LInfErr[i-1,1]) - np.log(LInfErr[i,1])
+    uLInfDiff = np.log(LInfErr[i-1,2]) - np.log(LInfErr[i,2])
+    vLInfDiff = np.log(LInfErr[i-1,3]) - np.log(LInfErr[i,3])
     LInfOrder[i,0] = psiLInfDiff/dtDiff
     LInfOrder[i,1] = wLInfDiff/dtDiff
     LInfOrder[i,2] = uLInfDiff/dtDiff
